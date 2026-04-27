@@ -82,6 +82,94 @@ def _eval_output_paths(
     return paths
 
 
+def _build_nr3d_eval_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Nr3D evaluation for KeySG with RAG"
+    )
+    parser.add_argument(
+        "--scene_dir", type=str, required=True, help="KeySG pipeline output directory"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="output/experiments/nr3d_eval",
+        help="Directory to write outputs",
+    )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default="keysg_rag",
+        help="Label used in output filenames so multiple runs can share one output directory",
+    )
+    parser.add_argument(
+        "--include_frame_images",
+        action="store_true",
+        help="Include frame images for visual grounding in LLM queries",
+    )
+    parser.add_argument(
+        "--include_frame_text",
+        action="store_true",
+        help="Include top-k frame text descriptions in RAG context",
+    )
+    parser.add_argument(
+        "--rag_model",
+        type=str,
+        default="gpt-5-mini",
+        help="OpenAI model for RAG LLM object selection",
+    )
+    parser.add_argument(
+        "--max_frame_images",
+        type=int,
+        default=4,
+        help="Max frame images to include in LLM prompt",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Limit number of queries"
+    )
+    parser.add_argument(
+        "--iou_thresholds",
+        type=str,
+        default="0.001,0.1,0.25",
+        help="Comma-separated IoU thresholds",
+    )
+    parser.add_argument(
+        "--top_k_objects",
+        type=int,
+        default=10,
+        help="Top-K object candidates to retrieve per query",
+    )
+    parser.add_argument(
+        "--top_k_frames",
+        type=int,
+        default=10,
+        help="Top-K frame candidates to retrieve per query",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Batch size for LLM queries (concurrent async calls)",
+    )
+    parser.add_argument(
+        "--nr3d_root",
+        type=str,
+        default=None,
+        help="Override NR3D data root. Defaults to ./nr3d_data when present.",
+    )
+    parser.add_argument(
+        "--use_filtered_queries",
+        action="store_true",
+        help="Use queries_by_scene_filtered/<scene>.json instead of the default queries_by_scene/<scene>.json.",
+    )
+    parser.add_argument(
+        "--debug_log",
+        type=str,
+        default=None,
+        help="Path to write per-query debug log (default: <output_dir>/<scene>_<run_name>_debug.log)",
+    )
+    return parser
+
+
 def _load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -414,10 +502,17 @@ def _walk_candidate_files(root: str, tokens: Sequence[str]) -> List[str]:
     return sorted(matches)
 
 
-def _preferred_scene_annotations_file(root: str, scene_name: str) -> Optional[str]:
+def _preferred_scene_annotations_file(
+    root: str,
+    scene_name: str,
+    *,
+    use_filtered_queries: bool = False,
+) -> Optional[str]:
+    preferred_dir = "queries_by_scene_filtered" if use_filtered_queries else "queries_by_scene"
+    fallback_dir = "queries_by_scene" if use_filtered_queries else "queries_by_scene_filtered"
     candidates = [
-        os.path.join(root, "queries_by_scene_filtered", f"{scene_name}.json"),
-        os.path.join(root, "queries_by_scene", f"{scene_name}.json"),
+        os.path.join(root, preferred_dir, f"{scene_name}.json"),
+        os.path.join(root, fallback_dir, f"{scene_name}.json"),
     ]
     for candidate in candidates:
         if os.path.isfile(candidate):
@@ -544,12 +639,21 @@ def _normalize_gt_object(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def _load_scene_annotations(scene_dir: str, nr3d_root: str) -> List[Dict[str, Any]]:
+def _load_scene_annotations(
+    scene_dir: str,
+    nr3d_root: str,
+    *,
+    use_filtered_queries: bool = False,
+) -> List[Dict[str, Any]]:
     if not os.path.isdir(nr3d_root):
         raise FileNotFoundError(f"NR3D root does not exist: {nr3d_root}")
 
     scene_name = _scene_base(scene_dir)
-    preferred = _preferred_scene_annotations_file(nr3d_root, scene_name)
+    preferred = _preferred_scene_annotations_file(
+        nr3d_root,
+        scene_name,
+        use_filtered_queries=use_filtered_queries,
+    )
     files = [preferred] if preferred else _walk_candidate_files(
         nr3d_root, ("nr3d", "annotation", "annot")
     )

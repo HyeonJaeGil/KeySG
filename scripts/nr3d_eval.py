@@ -23,7 +23,6 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -52,6 +51,7 @@ from eval_helpers import (
     construct_bbox_corners,
     _safe_bbox_from_center_extent,
     _extract_bbox_corners,
+    _build_nr3d_eval_arg_parser,
     # Scene / Data loading
     _eval_output_paths,
     _scene_base,
@@ -572,85 +572,7 @@ def _run_keysg_rag(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Nr3D evaluation for KeySG with RAG"
-    )
-    parser.add_argument(
-        "--scene_dir", type=str, required=True, help="KeySG pipeline output directory"
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="output/experiments/nr3d_eval",
-        help="Directory to write outputs",
-    )
-    parser.add_argument(
-        "--run_name",
-        type=str,
-        default="keysg_rag",
-        help="Label used in output filenames so multiple runs can share one output directory",
-    )
-    parser.add_argument(
-        "--include_frame_images",
-        action="store_true",
-        help="Include frame images for visual grounding in LLM queries",
-    )
-    parser.add_argument(
-        "--include_frame_text",
-        action="store_true",
-        help="Include top-k frame text descriptions in RAG context",
-    )
-    parser.add_argument(
-        "--rag_model",
-        type=str,
-        default="gpt-5-mini",
-        help="OpenAI model for RAG LLM object selection",
-    )
-    parser.add_argument(
-        "--max_frame_images",
-        type=int,
-        default=4,
-        help="Max frame images to include in LLM prompt",
-    )
-    parser.add_argument(
-        "--limit", type=int, default=None, help="Limit number of queries"
-    )
-    parser.add_argument(
-        "--iou_thresholds",
-        type=str,
-        default="0.001,0.1,0.25",
-        help="Comma-separated IoU thresholds",
-    )
-    parser.add_argument(
-        "--top_k_objects",
-        type=int,
-        default=10,
-        help="Top-K object candidates to retrieve per query",
-    )
-    parser.add_argument(
-        "--top_k_frames",
-        type=int,
-        default=10,
-        help="Top-K frame candidates to retrieve per query",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=32,
-        help="Batch size for LLM queries (concurrent async calls)",
-    )
-    parser.add_argument(
-        "--nr3d_root",
-        type=str,
-        default=None,
-        help="Override NR3D data root. Defaults to ./nr3d_data when present.",
-    )
-    parser.add_argument(
-        "--debug_log",
-        type=str,
-        default=None,
-        help="Path to write per-query debug log (default: <output_dir>/<scene>_<run_name>_debug.log)",
-    )
+    parser = _build_nr3d_eval_arg_parser()
     args = parser.parse_args()
 
     iou_thresholds = tuple(
@@ -660,7 +582,11 @@ def main() -> None:
     nr3d_root = _resolve_nr3d_root(args.nr3d_root)
     logger.info("Using NR3D data root: {}", nr3d_root)
 
-    annotations = _load_scene_annotations(args.scene_dir, nr3d_root=nr3d_root)
+    annotations = _load_scene_annotations(
+        args.scene_dir,
+        nr3d_root=nr3d_root,
+        use_filtered_queries=args.use_filtered_queries,
+    )
     gt_objects = _load_gt_scene_objects(args.scene_dir, nr3d_root=nr3d_root)
 
     gt_corners_map = {}

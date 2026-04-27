@@ -11,6 +11,8 @@ Recommended layout:
 
 ```text
 nr3d_data/
+├── queries_by_scene/
+│   └── scene0011_00.json
 ├── queries_by_scene_filtered/
 │   └── scene0011_00.json
 └── gt_bbox/
@@ -40,6 +42,12 @@ Example:
 ```
 
 Preferred location:
+
+```text
+nr3d_data/queries_by_scene/scene0011_00.json
+```
+
+Optional filtered location:
 
 ```text
 nr3d_data/queries_by_scene_filtered/scene0011_00.json
@@ -80,6 +88,14 @@ nr3d_data/gt_bbox/scene0011_00_gt.json
 ```bash
 MPLCONFIGDIR=/tmp/matplotlib python scripts/nr3d_eval.py \
   --scene_dir output/keysg_rag1/ScanNet/scene0011_00
+```
+
+To use filtered per-scene queries instead of the default `queries_by_scene` directory:
+
+```bash
+MPLCONFIGDIR=/tmp/matplotlib python scripts/nr3d_eval.py \
+  --scene_dir output/keysg_rag1/ScanNet/scene0011_00 \
+  --use_filtered_queries
 ```
 
 If your NR3D files live somewhere else, override the default:

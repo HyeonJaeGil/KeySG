@@ -149,8 +149,8 @@ Prerequisites:
 - a built KeySG scene output, for example `output/keysg_rag1/ScanNet/scene0011_00`
 - a local `nr3d_data` directory containing:
   - Nr3D query annotations
-    - preferred: `queries_by_scene_filtered/<scene>.json`, for example `queries_by_scene_filtered/scene0011_00.json`
-    - fallback: `queries_by_scene/<scene>.json`
+    - default: `queries_by_scene/<scene>.json`, for example `queries_by_scene/scene0011_00.json`
+    - optional with `--use_filtered_queries`: `queries_by_scene_filtered/<scene>.json`
     - fallback: a shared annotations file such as `nr3d.csv`
   - GT bbox files for the same scene, such as `scene0011_00_gt.json`
 - `OPENAI_API_KEY` in `.env`, since query analysis and object selection use OpenAI models
@@ -188,6 +188,11 @@ python scripts/nr3d_eval.py \
 python scripts/nr3d_eval.py \
   --scene_dir output/keysg_rag1/ScanNet/scene0011_00 \
   --nr3d_root /path/to/nr3d_root
+
+# Opt into filtered per-scene queries instead of the default queries_by_scene
+python scripts/nr3d_eval.py \
+  --scene_dir output/keysg_rag1/ScanNet/scene0011_00 \
+  --use_filtered_queries
 ```
 
 Outputs:

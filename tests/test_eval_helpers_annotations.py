@@ -13,6 +13,55 @@ from eval_helpers import (
 
 
 class SceneSpecificAnnotationsTest(unittest.TestCase):
+    def test_prefers_filtered_scene_file_over_unfiltered_scene_file(self) -> None:
+        scene_name = "scene0011_00"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            filtered_dir = root / "queries_by_scene_filtered"
+            unfiltered_dir = root / "queries_by_scene"
+            filtered_dir.mkdir()
+            unfiltered_dir.mkdir()
+
+            with open(
+                unfiltered_dir / f"{scene_name}.json", "w", encoding="utf-8"
+            ) as handle:
+                json.dump(
+                    [
+                        {
+                            "scan_id": scene_name,
+                            "utterance": "from unfiltered scene file",
+                            "target_id": "1",
+                        }
+                    ],
+                    handle,
+                )
+
+            with open(
+                filtered_dir / f"{scene_name}.json", "w", encoding="utf-8"
+            ) as handle:
+                json.dump(
+                    [
+                        {
+                            "scan_id": scene_name,
+                            "utterance": "from filtered scene file",
+                            "target_id": "2",
+                            "ann_id": 101,
+                        }
+                    ],
+                    handle,
+                )
+
+            annotations = _load_scene_annotations(
+                f"/unused/path/{scene_name}",
+                nr3d_root=str(root),
+            )
+
+        self.assertEqual(len(annotations), 1)
+        self.assertEqual(annotations[0]["utterance"], "from filtered scene file")
+        self.assertEqual(annotations[0]["target_id"], "2")
+        self.assertEqual(annotations[0]["ann_id"], 101)
+
     def test_prefers_queries_by_scene_file_over_shared_csv(self) -> None:
         scene_name = "scene0011_00"
 

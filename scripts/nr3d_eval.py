@@ -47,8 +47,6 @@ from keysg.rag.query_analysis import (
     SYSTEM_INSTRUCTIONS as _QUERY_ANALYSIS_INSTRUCTIONS,
 )
 from keysg.utils.load_utils import load_scene_nodes, get_objects
-from keysg.utils.iou_eval import strict_box3d_iou
-
 from eval_helpers import (
     # Geometry / BBox
     construct_bbox_corners,
@@ -61,6 +59,7 @@ from eval_helpers import (
     _load_json,
     _load_scene_annotations,
     _load_gt_scene_objects,
+    _compute_grounding_metrics,
     # RAG helpers
     _z_score_normalize,
     _get_obj_center,
@@ -213,65 +212,13 @@ def _build_grounding_result_row(
         },
         "timestamp": timestamp,
     }
-
-
-def _annotation_split_map(annotations: List[Dict[str, Any]]) -> Dict[Any, str]:
-    return {ann.get("ann_id"): ann.get("split") or "all" for ann in annotations}
-
-
 def _compute_metrics_from_grounding_results(
     results: List[Dict[str, Any]],
     annotations: List[Dict[str, Any]],
     gt_corners_map: Dict[str, np.ndarray],
     iou_thresholds: tuple[float, ...],
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
-    split_map = _annotation_split_map(annotations)
-    enriched_results: List[Dict[str, Any]] = []
-    failures: List[Dict[str, Any]] = []
-    grouped: Dict[str, List[Dict[str, Any]]] = {"overall": []}
-
-    for result in results:
-        gt_bbox = gt_corners_map.get(str(result.get("ground_truth_target_id")))
-        pred_bbox = result.get("bbox_3d")
-        iou = (
-            strict_box3d_iou(pred_bbox, gt_bbox)
-            if gt_bbox is not None and pred_bbox is not None
-            else 0.0
-        )
-        enriched = {**result, "iou_3d_strict": iou}
-        enriched_results.append(enriched)
-        grouped["overall"].append(enriched)
-
-        split = split_map.get(result.get("ann_id"), "all")
-        grouped.setdefault(split, []).append(enriched)
-
-        if iou < 0.1:
-            failures.append(enriched)
-
-    def _stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-        ious = [float(row.get("iou_3d_strict", 0.0)) for row in rows]
-        num_predictions = sum(row.get("predicted_object_id") is not None for row in rows)
-
-        stats: Dict[str, Any] = {
-            "num_queries": len(rows),
-            "num_predictions": num_predictions,
-            "mean_iou": float(np.mean(ious)) if ious else 0.0,
-        }
-        for threshold in iou_thresholds:
-            key = f"acc@{threshold:g}"
-            stats[key] = (
-                float(sum(iou >= threshold for iou in ious) / len(ious))
-                if ious
-                else 0.0
-            )
-        return stats
-
-    metrics = {
-        "iou_metric": "strict_axis_aligned_iou",
-        "iou_thresholds": list(iou_thresholds),
-        "splits": {split: _stats(rows) for split, rows in grouped.items()},
-    }
-    return enriched_results, metrics, failures
+    return _compute_grounding_metrics(results, annotations, gt_corners_map, iou_thresholds)
 
 
 def _format_metrics(metrics: Dict[str, Any]) -> str:

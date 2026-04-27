@@ -11,7 +11,7 @@ Recommended layout:
 
 ```text
 nr3d_data/
-├── queries_by_scene/
+├── queries_by_scene_filtered/
 │   └── scene0011_00.json
 └── gt_bbox/
     └── scene0011_00_gt.json
@@ -42,7 +42,7 @@ Example:
 Preferred location:
 
 ```text
-nr3d_data/queries_by_scene/scene0011_00.json
+nr3d_data/queries_by_scene_filtered/scene0011_00.json
 ```
 
 ## File 2: GT object boxes

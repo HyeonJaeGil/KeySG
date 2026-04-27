@@ -16,6 +16,22 @@ from keysg.utils.iou_eval import strict_box3d_iou
 
 
 _EVAL_KEYS = ("num_queries", "num_predictions", "mean_iou")
+_ANNOTATION_FLAG_FIELDS = (
+    "uses_spatial_lang",
+    "uses_color_lang",
+    "uses_shape_lang",
+    "mentions_target_class",
+)
+_LANGUAGE_BUCKETS = (
+    ("with_spatial_lang", "uses_spatial_lang", True),
+    ("without_spatial_lang", "uses_spatial_lang", False),
+    ("with_color_lang", "uses_color_lang", True),
+    ("without_color_lang", "uses_color_lang", False),
+    ("with_shape_lang", "uses_shape_lang", True),
+    ("without_shape_lang", "uses_shape_lang", False),
+    ("with_target_mention", "mentions_target_class", True),
+    ("without_target_mention", "mentions_target_class", False),
+)
 
 
 def _scene_base(scene_dir: str) -> str:
@@ -399,8 +415,14 @@ def _walk_candidate_files(root: str, tokens: Sequence[str]) -> List[str]:
 
 
 def _preferred_scene_annotations_file(root: str, scene_name: str) -> Optional[str]:
-    candidate = os.path.join(root, "queries_by_scene", f"{scene_name}.json")
-    return candidate if os.path.isfile(candidate) else None
+    candidates = [
+        os.path.join(root, "queries_by_scene_filtered", f"{scene_name}.json"),
+        os.path.join(root, "queries_by_scene", f"{scene_name}.json"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def _entry_scene_id(entry: Dict[str, Any]) -> Optional[str]:
@@ -592,6 +614,94 @@ def _annotation_split_map(annotations: Sequence[Dict[str, Any]]) -> Dict[Any, st
     for ann in annotations:
         mapping[ann.get("ann_id")] = ann.get("split") or "all"
     return mapping
+
+
+def _annotation_flags(annotation: Optional[Dict[str, Any]], result: Dict[str, Any]) -> Dict[str, bool]:
+    merged: Dict[str, bool] = {}
+    for field in _ANNOTATION_FLAG_FIELDS:
+        if annotation is not None and field in annotation:
+            merged[field] = bool(annotation.get(field))
+        else:
+            merged[field] = bool(result.get(field))
+    return merged
+
+
+def _compute_eval_stats(
+    rows: Sequence[Dict[str, Any]],
+    iou_thresholds: Sequence[float],
+) -> Dict[str, Any]:
+    ious = [float(row.get("iou_3d_strict", 0.0)) for row in rows]
+    num_predictions = sum(row.get("predicted_object_id") is not None for row in rows)
+
+    stats: Dict[str, Any] = {
+        "num_queries": len(rows),
+        "num_predictions": num_predictions,
+        "mean_iou": float(np.mean(ious)) if ious else 0.0,
+    }
+    for threshold in iou_thresholds:
+        key = f"acc@{threshold:g}"
+        stats[key] = (
+            float(sum(iou >= threshold for iou in ious) / len(ious))
+            if ious
+            else 0.0
+        )
+    return stats
+
+
+def _compute_grounding_metrics(
+    results: Sequence[Dict[str, Any]],
+    annotations: Sequence[Dict[str, Any]],
+    gt_corners_map: Dict[str, np.ndarray],
+    iou_thresholds: Sequence[float],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
+    split_map = _annotation_split_map(annotations)
+    ann_by_id = {ann.get("ann_id"): ann for ann in annotations}
+
+    enriched_results: List[Dict[str, Any]] = []
+    failures: List[Dict[str, Any]] = []
+    split_grouped: Dict[str, List[Dict[str, Any]]] = {"overall": []}
+    bucket_grouped: Dict[str, List[Dict[str, Any]]] = {
+        bucket_name: [] for bucket_name, _, _ in _LANGUAGE_BUCKETS
+    }
+
+    for result in results:
+        annotation = ann_by_id.get(result.get("ann_id"))
+        flags = _annotation_flags(annotation, result)
+        gt_bbox = gt_corners_map.get(str(result.get("ground_truth_target_id")))
+        pred_bbox = result.get("bbox_3d")
+        iou = (
+            strict_box3d_iou(pred_bbox, gt_bbox)
+            if gt_bbox is not None and pred_bbox is not None
+            else 0.0
+        )
+
+        enriched = {**result, **flags, "iou_3d_strict": iou}
+        enriched_results.append(enriched)
+        split_grouped["overall"].append(enriched)
+
+        split = split_map.get(result.get("ann_id"), "all")
+        split_grouped.setdefault(split, []).append(enriched)
+
+        for bucket_name, field_name, expected in _LANGUAGE_BUCKETS:
+            if flags[field_name] is expected:
+                bucket_grouped[bucket_name].append(enriched)
+
+        if iou < 0.1:
+            failures.append(enriched)
+
+    ordered_groups: Dict[str, List[Dict[str, Any]]] = {}
+    ordered_groups.update(split_grouped)
+    ordered_groups.update(bucket_grouped)
+
+    metrics = {
+        "iou_metric": "strict_axis_aligned_iou",
+        "iou_thresholds": list(iou_thresholds),
+        "splits": {
+            group_name: _compute_eval_stats(rows, iou_thresholds)
+            for group_name, rows in ordered_groups.items()
+        },
+    }
+    return enriched_results, metrics, failures
 
 
 def _evaluate_results(

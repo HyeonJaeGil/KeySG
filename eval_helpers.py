@@ -354,6 +354,11 @@ def _walk_candidate_files(root: str, tokens: Sequence[str]) -> List[str]:
     return sorted(matches)
 
 
+def _preferred_scene_annotations_file(root: str, scene_name: str) -> Optional[str]:
+    candidate = os.path.join(root, "queries_by_scene", f"{scene_name}.json")
+    return candidate if os.path.isfile(candidate) else None
+
+
 def _entry_scene_id(entry: Dict[str, Any]) -> Optional[str]:
     for key in (
         "scene_id",
@@ -478,7 +483,10 @@ def _load_scene_annotations(scene_dir: str, nr3d_root: str) -> List[Dict[str, An
         raise FileNotFoundError(f"NR3D root does not exist: {nr3d_root}")
 
     scene_name = _scene_base(scene_dir)
-    files = _walk_candidate_files(nr3d_root, ("nr3d", "annotation", "annot"))
+    preferred = _preferred_scene_annotations_file(nr3d_root, scene_name)
+    files = [preferred] if preferred else _walk_candidate_files(
+        nr3d_root, ("nr3d", "annotation", "annot")
+    )
     annotations: List[Dict[str, Any]] = []
 
     for path in files:

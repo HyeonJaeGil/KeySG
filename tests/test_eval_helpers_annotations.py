@@ -1,10 +1,15 @@
 import csv
 import json
+import os
 import pathlib
 import tempfile
 import unittest
 
-from eval_helpers import _load_scene_annotations
+from eval_helpers import (
+    _eval_output_paths,
+    _load_scene_annotations,
+    _resolve_nr3d_root,
+)
 
 
 class SceneSpecificAnnotationsTest(unittest.TestCase):
@@ -52,6 +57,54 @@ class SceneSpecificAnnotationsTest(unittest.TestCase):
         self.assertEqual(annotations[0]["utterance"], "from scene file")
         self.assertEqual(annotations[0]["target_id"], "2")
         self.assertEqual(annotations[0]["ann_id"], 99)
+
+
+class Nr3dRootResolutionTest(unittest.TestCase):
+    def test_uses_local_nr3d_data_directory_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            nr3d_dir = root / "nr3d_data"
+            (nr3d_dir / "queries_by_scene").mkdir(parents=True)
+            (nr3d_dir / "gt_bbox").mkdir()
+
+            prev_cwd = os.getcwd()
+            try:
+                os.chdir(root)
+                resolved = _resolve_nr3d_root(None)
+            finally:
+                os.chdir(prev_cwd)
+
+        self.assertEqual(resolved, str(nr3d_dir))
+
+
+class EvalOutputPathsTest(unittest.TestCase):
+    def test_custom_run_name_changes_all_output_filenames(self) -> None:
+        paths = _eval_output_paths(
+            output_dir="/tmp/nr3d_eval",
+            scene_dir="/tmp/scenes/scene0011_00",
+            run_name="with_frames",
+        )
+
+        self.assertEqual(
+            paths["results"],
+            "/tmp/nr3d_eval/scene0011_00_with_frames_results.json",
+        )
+        self.assertEqual(
+            paths["metrics"],
+            "/tmp/nr3d_eval/scene0011_00_with_frames_metrics.json",
+        )
+        self.assertEqual(
+            paths["failed"],
+            "/tmp/nr3d_eval/scene0011_00_with_frames_failed.json",
+        )
+        self.assertEqual(
+            paths["summary"],
+            "/tmp/nr3d_eval/scene0011_00_with_frames_summary.txt",
+        )
+        self.assertEqual(
+            paths["debug"],
+            "/tmp/nr3d_eval/scene0011_00_with_frames_debug.log",
+        )
 
 
 if __name__ == "__main__":

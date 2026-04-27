@@ -1,8 +1,8 @@
 # NR3D Input Requirements
 
-## What `nr3d_root` should contain
+## What `./nr3d_data` should contain
 
-Think of `nr3d_root` as a folder with two things:
+By default, `scripts/nr3d_eval.py` looks for a local `./nr3d_data` folder with two things:
 
 1. a file that says what people asked
 2. a file that says where the GT objects are
@@ -10,9 +10,11 @@ Think of `nr3d_root` as a folder with two things:
 Recommended layout:
 
 ```text
-nr3d_root/
-├── nr3d.csv
-└── scene0011_00_gt.json
+nr3d_data/
+├── queries_by_scene/
+│   └── scene0011_00.json
+└── gt_bbox/
+    └── scene0011_00_gt.json
 ```
 
 File names do not have to match exactly, but both data types must exist somewhere under the folder.
@@ -37,7 +39,11 @@ Example:
 }
 ```
 
-Your current `nr3d.csv` is valid for this part.
+Preferred location:
+
+```text
+nr3d_data/queries_by_scene/scene0011_00.json
+```
 
 ## File 2: GT object boxes
 
@@ -63,17 +69,20 @@ Example:
 
 Without this file, evaluation cannot compute IoU.
 
-## Current status
+Preferred location:
 
-What you already have:
-
-- `nr3d.csv`
-
-What is still needed:
-
-- a GT bbox file for `scene0011_00`
+```text
+nr3d_data/gt_bbox/scene0011_00_gt.json
+```
 
 ## Run
+
+```bash
+MPLCONFIGDIR=/tmp/matplotlib python scripts/nr3d_eval.py \
+  --scene_dir output/keysg_rag1/ScanNet/scene0011_00
+```
+
+If your NR3D files live somewhere else, override the default:
 
 ```bash
 MPLCONFIGDIR=/tmp/matplotlib python scripts/nr3d_eval.py \

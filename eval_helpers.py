@@ -22,6 +22,50 @@ def _scene_base(scene_dir: str) -> str:
     return os.path.basename(os.path.normpath(scene_dir))
 
 
+def _resolve_nr3d_root(nr3d_root: Optional[str]) -> str:
+    if nr3d_root:
+        if os.path.isdir(nr3d_root):
+            return nr3d_root
+        raise FileNotFoundError(f"NR3D root does not exist: {nr3d_root}")
+
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.abspath(os.path.join(os.getcwd(), "nr3d_data")),
+        os.path.join(repo_root, "nr3d_data"),
+    ]
+
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        "NR3D root not provided and no local ./nr3d_data directory was found"
+    )
+
+
+def _eval_output_paths(
+    output_dir: str,
+    scene_dir: str,
+    run_name: str,
+    script_path: Optional[str] = None,
+) -> Dict[str, str]:
+    base = _scene_base(scene_dir)
+    stem = f"{base}_{run_name}"
+    paths = {
+        "results": os.path.join(output_dir, f"{stem}_results.json"),
+        "metrics": os.path.join(output_dir, f"{stem}_metrics.json"),
+        "failed": os.path.join(output_dir, f"{stem}_failed.json"),
+        "summary": os.path.join(output_dir, f"{stem}_summary.txt"),
+        "debug": os.path.join(output_dir, f"{stem}_debug.log"),
+        "args": os.path.join(output_dir, f"{stem}_args.json"),
+        "meta": os.path.join(output_dir, f"{stem}_run_meta.json"),
+    }
+    if script_path:
+        script_name = os.path.basename(script_path)
+        paths["script_copy"] = os.path.join(output_dir, f"{stem}_{script_name}")
+    return paths
+
+
 def _load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -659,10 +703,17 @@ def _collect_failed_queries(
     return failed
 
 
-def _save_experiment_artifacts(output_dir: str, args: argparse.Namespace, script_path: str) -> None:
+def _save_experiment_artifacts(
+    output_dir: str,
+    scene_dir: str,
+    run_name: str,
+    args: argparse.Namespace,
+    script_path: str,
+) -> None:
     os.makedirs(output_dir, exist_ok=True)
-    args_path = os.path.join(output_dir, "args.json")
-    meta_path = os.path.join(output_dir, "run_meta.json")
+    paths = _eval_output_paths(output_dir, scene_dir, run_name, script_path=script_path)
+    args_path = paths["args"]
+    meta_path = paths["meta"]
     with open(args_path, "w", encoding="utf-8") as handle:
         json.dump(vars(args), handle, indent=2, sort_keys=True)
     with open(meta_path, "w", encoding="utf-8") as handle:
@@ -678,7 +729,7 @@ def _save_experiment_artifacts(output_dir: str, args: argparse.Namespace, script
             sort_keys=True,
         )
     try:
-        shutil.copy2(script_path, os.path.join(output_dir, os.path.basename(script_path)))
+        shutil.copy2(script_path, paths["script_copy"])
     except Exception as exc:
         logger.debug("Could not copy experiment script {}: {}", script_path, exc)
 

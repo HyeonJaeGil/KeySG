@@ -55,7 +55,9 @@ from eval_helpers import (
     _safe_bbox_from_center_extent,
     _extract_bbox_corners,
     # Scene / Data loading
+    _eval_output_paths,
     _scene_base,
+    _resolve_nr3d_root,
     _load_json,
     _load_scene_annotations,
     _load_gt_scene_objects,
@@ -284,13 +286,7 @@ def _format_metrics(metrics: Dict[str, Any]) -> str:
 
 
 def _result_paths(output_dir: str, scene_dir: str, run_name: str) -> Dict[str, str]:
-    base = _scene_base(scene_dir)
-    return {
-        "results": os.path.join(output_dir, f"{base}_{run_name}_results.json"),
-        "metrics": os.path.join(output_dir, f"{base}_{run_name}_metrics.json"),
-        "failed": os.path.join(output_dir, f"{base}_{run_name}_failed.json"),
-        "summary": os.path.join(output_dir, f"{base}_{run_name}_summary.txt"),
-    }
+    return _eval_output_paths(output_dir, scene_dir, run_name)
 
 
 def _write_json(path: str, data: Any) -> None:
@@ -642,6 +638,12 @@ def main() -> None:
         help="Directory to write outputs",
     )
     parser.add_argument(
+        "--run_name",
+        type=str,
+        default="keysg_rag",
+        help="Label used in output filenames so multiple runs can share one output directory",
+    )
+    parser.add_argument(
         "--include_frame_images",
         action="store_true",
         help="Include frame images for visual grounding in LLM queries",
@@ -693,14 +695,14 @@ def main() -> None:
     parser.add_argument(
         "--nr3d_root",
         type=str,
-        default="/mnt/ssd2/datasets/ScanNetv2/NR3D",
-        help="Root directory containing Nr3D annotations and GT",
+        default=None,
+        help="Override NR3D data root. Defaults to ./nr3d_data when present.",
     )
     parser.add_argument(
         "--debug_log",
         type=str,
         default=None,
-        help="Path to write per-query debug log (default: <output_dir>/<scene>_debug.log)",
+        help="Path to write per-query debug log (default: <output_dir>/<scene>_<run_name>_debug.log)",
     )
     args = parser.parse_args()
 
@@ -708,8 +710,11 @@ def main() -> None:
         float(x) for x in args.iou_thresholds.split(",") if x.strip()
     )
 
-    annotations = _load_scene_annotations(args.scene_dir, nr3d_root=args.nr3d_root)
-    gt_objects = _load_gt_scene_objects(args.scene_dir, nr3d_root=args.nr3d_root)
+    nr3d_root = _resolve_nr3d_root(args.nr3d_root)
+    logger.info("Using NR3D data root: {}", nr3d_root)
+
+    annotations = _load_scene_annotations(args.scene_dir, nr3d_root=nr3d_root)
+    gt_objects = _load_gt_scene_objects(args.scene_dir, nr3d_root=nr3d_root)
 
     gt_corners_map = {}
     for ob in gt_objects:
@@ -726,14 +731,12 @@ def main() -> None:
         if ob.get("id")
     }
 
-    base = _scene_base(args.scene_dir)
-    debug_log_path = args.debug_log or os.path.join(
-        args.output_dir, f"{base}_debug.log"
-    )
-    run_name = "keysg_rag"
-    paths = _result_paths(args.output_dir, args.scene_dir, run_name)
+    paths = _result_paths(args.output_dir, args.scene_dir, args.run_name)
+    debug_log_path = args.debug_log or paths["debug"]
 
-    _save_experiment_artifacts(args.output_dir, args, __file__)
+    _save_experiment_artifacts(
+        args.output_dir, args.scene_dir, args.run_name, args, __file__
+    )
 
     rag_results = _run_keysg_rag(
         args.scene_dir,

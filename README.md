@@ -147,7 +147,7 @@ for floor in graph.floors:
 Prerequisites:
 
 - a built KeySG scene output, for example `output/keysg_rag1/ScanNet/scene0011_00`
-- an `nr3d_root` directory containing:
+- a local `nr3d_data` directory containing:
   - Nr3D query annotations
     - preferred: `queries_by_scene/<scene>.json`, for example `queries_by_scene/scene0011_00.json`
     - fallback: a shared annotations file such as `nr3d.csv`
@@ -158,8 +158,7 @@ Minimal example:
 
 ```bash
 python scripts/nr3d_eval.py \
-  --scene_dir output/keysg_rag1/ScanNet/scene0011_00 \
-  --nr3d_root /path/to/nr3d_root
+  --scene_dir output/keysg_rag1/ScanNet/scene0011_00
 ```
 
 If Matplotlib warns about an unwritable config/cache directory in your environment, prepend `MPLCONFIGDIR=/tmp/matplotlib`.
@@ -170,28 +169,42 @@ Useful options:
 # Evaluate only the first 10 queries
 python scripts/nr3d_eval.py \
   --scene_dir output/keysg_rag1/ScanNet/scene0011_00 \
-  --nr3d_root /path/to/nr3d_root \
   --limit 10
 
 # Save outputs to a custom directory
 python scripts/nr3d_eval.py \
   --scene_dir output/keysg_rag1/ScanNet/scene0011_00 \
-  --nr3d_root /path/to/nr3d_root \
   --output_dir output/experiments/nr3d_eval_scene0011
+
+# Save a second run in the same output directory without overwriting the first
+python scripts/nr3d_eval.py \
+  --scene_dir output/keysg_rag1/ScanNet/scene0011_00 \
+  --output_dir output/experiments/nr3d_eval \
+  --run_name with_frames \
+  --include_frame_text
+
+# Override the default local ./nr3d_data directory
+python scripts/nr3d_eval.py \
+  --scene_dir output/keysg_rag1/ScanNet/scene0011_00 \
+  --nr3d_root /path/to/nr3d_root
 ```
 
 Outputs:
 
-- `<output_dir>/<scene>_keysg_rag_results.json`
+- `<output_dir>/<scene>_<run_name>_results.json`
   Per-query grounding results, including predicted object id, predicted label, bbox, confidence, reason, retrieved candidates, retrieved frames, and strict IoU.
-- `<output_dir>/<scene>_keysg_rag_metrics.json`
+- `<output_dir>/<scene>_<run_name>_metrics.json`
   Aggregate metrics using strict axis-aligned IoU.
-- `<output_dir>/<scene>_keysg_rag_failed.json`
+- `<output_dir>/<scene>_<run_name>_failed.json`
   Queries with strict IoU below `0.1`.
-- `<output_dir>/<scene>_keysg_rag_summary.txt`
+- `<output_dir>/<scene>_<run_name>_summary.txt`
   Human-readable metric summary.
-- `<output_dir>/<scene>_debug.log`
+- `<output_dir>/<scene>_<run_name>_debug.log`
   Per-query debug trace.
+- `<output_dir>/<scene>_<run_name>_args.json`
+  CLI arguments used for that run.
+- `<output_dir>/<scene>_<run_name>_run_meta.json`
+  Execution metadata for that run.
 
 For the expected Nr3D folder contents, see [docs/nr3d-input-requirements.md](docs/nr3d-input-requirements.md).
 

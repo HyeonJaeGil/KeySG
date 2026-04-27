@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -46,13 +47,12 @@ from keysg.rag.query_analysis import (
     SYSTEM_INSTRUCTIONS as _QUERY_ANALYSIS_INSTRUCTIONS,
 )
 from keysg.utils.load_utils import load_scene_nodes, get_objects
+from keysg.utils.iou_eval import strict_box3d_iou
 
 from eval_helpers import (
     # Geometry / BBox
     construct_bbox_corners,
-    box3d_iou,
     _safe_bbox_from_center_extent,
-    _bbox_to_np,
     _extract_bbox_corners,
     # Scene / Data loading
     _scene_base,
@@ -68,16 +68,9 @@ from eval_helpers import (
     _load_frame_images,
     # LLM batch
     _run_structured_batch as _run_structured_batch_rag,
-    # Evaluation / Metrics
-    _EVAL_KEYS,
-    _evaluate_results,
-    _format_metrics,
     # Debug logging
     _write_debug_entry,
-    # Experiment tracking
-    _collect_failed_queries,
     _save_experiment_artifacts,
-    _write_outputs,
 )
 
 try:
@@ -130,6 +123,180 @@ _OBJECT_SELECTION_SYSTEM_PROMPT = (
     "  - Low (≤0.35): Ambiguous guess or no plausible candidate (return null if completely irrelevant).\n"
     "- **Justification:** Briefly cite specific candidate attributes, spatial relations, and frame context that drove the decision."
 )
+
+
+def _serialize_search_hits(hits: List[Any]) -> List[Dict[str, Any]]:
+    serialized: List[Dict[str, Any]] = []
+    for hit in hits:
+        chunk = getattr(hit, "chunk", None)
+        metadata = dict(getattr(chunk, "metadata", None) or {})
+        serialized.append(
+            {
+                "id": getattr(chunk, "id", None),
+                "score": float(getattr(hit, "score", 0.0)),
+                "content": getattr(chunk, "content", ""),
+                "metadata": metadata,
+            }
+        )
+    return serialized
+
+
+def _serialize_frame_chunks(chunks: List[Any]) -> List[Dict[str, Any]]:
+    frames: List[Dict[str, Any]] = []
+    for chunk in chunks:
+        meta = dict(getattr(chunk, "metadata", None) or {})
+        frames.append(
+            {
+                "id": getattr(chunk, "id", None),
+                "content": getattr(chunk, "content", ""),
+                "room_id": meta.get("room_id"),
+                "frame_index": meta.get("frame_index"),
+                "image_path": meta.get("image_path"),
+                "labeled_image_path": meta.get("labeled_image_path"),
+            }
+        )
+    return frames
+
+
+def _build_grounding_result_row(
+    *,
+    scene_id: str,
+    ann: Dict[str, Any],
+    utterance: str,
+    parsed_target: Optional[str],
+    parsed_anchor_objects: List[str],
+    target_vis: List[Any],
+    anchor_vis: List[Any],
+    top_frame_chunks: List[Any],
+    spatial_rel_lines: List[str],
+    selection: Any,
+    pred_id: Optional[str],
+    pred_label: Optional[str],
+    bbox_3d: Optional[List[List[float]]],
+    timestamp: str,
+) -> Dict[str, Any]:
+    selection_error = str(selection) if isinstance(selection, Exception) else None
+    confidence = (
+        None if isinstance(selection, Exception) else getattr(selection, "confidence", None)
+    )
+    reason = None if isinstance(selection, Exception) else getattr(selection, "reason", None)
+    rejected_ids = (
+        []
+        if isinstance(selection, Exception)
+        else list(getattr(selection, "rejected_ids", []) or [])
+    )
+    guess_id = None if isinstance(selection, Exception) else getattr(selection, "guess_id", None)
+
+    return {
+        "ann_id": ann.get("ann_id"),
+        "scene_id": ann.get("scene_id") or scene_id,
+        "split": ann.get("split") or "all",
+        "utterance": utterance,
+        "ground_truth_target_id": ann.get("target_id"),
+        "predicted_object_id": pred_id,
+        "predicted_label": pred_label,
+        "bbox_3d": bbox_3d,
+        "confidence": confidence,
+        "reason": reason,
+        "rejected_ids": rejected_ids,
+        "guess_id": guess_id,
+        "selection_error": selection_error,
+        "parsed_target": parsed_target,
+        "parsed_anchor_objects": parsed_anchor_objects,
+        "retrieval": {
+            "target_candidates": _serialize_search_hits(target_vis),
+            "anchor_candidates": _serialize_search_hits(anchor_vis),
+            "frames": _serialize_frame_chunks(top_frame_chunks),
+            "spatial_relations": list(spatial_rel_lines),
+        },
+        "timestamp": timestamp,
+    }
+
+
+def _annotation_split_map(annotations: List[Dict[str, Any]]) -> Dict[Any, str]:
+    return {ann.get("ann_id"): ann.get("split") or "all" for ann in annotations}
+
+
+def _compute_metrics_from_grounding_results(
+    results: List[Dict[str, Any]],
+    annotations: List[Dict[str, Any]],
+    gt_corners_map: Dict[str, np.ndarray],
+    iou_thresholds: tuple[float, ...],
+) -> tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
+    split_map = _annotation_split_map(annotations)
+    enriched_results: List[Dict[str, Any]] = []
+    failures: List[Dict[str, Any]] = []
+    grouped: Dict[str, List[Dict[str, Any]]] = {"overall": []}
+
+    for result in results:
+        gt_bbox = gt_corners_map.get(str(result.get("ground_truth_target_id")))
+        pred_bbox = result.get("bbox_3d")
+        iou = (
+            strict_box3d_iou(pred_bbox, gt_bbox)
+            if gt_bbox is not None and pred_bbox is not None
+            else 0.0
+        )
+        enriched = {**result, "iou_3d_strict": iou}
+        enriched_results.append(enriched)
+        grouped["overall"].append(enriched)
+
+        split = split_map.get(result.get("ann_id"), "all")
+        grouped.setdefault(split, []).append(enriched)
+
+        if iou < 0.1:
+            failures.append(enriched)
+
+    def _stats(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        ious = [float(row.get("iou_3d_strict", 0.0)) for row in rows]
+        num_predictions = sum(row.get("predicted_object_id") is not None for row in rows)
+
+        stats: Dict[str, Any] = {
+            "num_queries": len(rows),
+            "num_predictions": num_predictions,
+            "mean_iou": float(np.mean(ious)) if ious else 0.0,
+        }
+        for threshold in iou_thresholds:
+            key = f"acc@{threshold:g}"
+            stats[key] = (
+                float(sum(iou >= threshold for iou in ious) / len(ious))
+                if ious
+                else 0.0
+            )
+        return stats
+
+    metrics = {
+        "iou_metric": "strict_axis_aligned_iou",
+        "iou_thresholds": list(iou_thresholds),
+        "splits": {split: _stats(rows) for split, rows in grouped.items()},
+    }
+    return enriched_results, metrics, failures
+
+
+def _format_metrics(metrics: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    for split, stats in metrics.get("splits", {}).items():
+        parts = [
+            f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
+            for key, value in stats.items()
+        ]
+        lines.append(f"{split}: " + ", ".join(parts))
+    return "\n".join(lines)
+
+
+def _result_paths(output_dir: str, scene_dir: str, run_name: str) -> Dict[str, str]:
+    base = _scene_base(scene_dir)
+    return {
+        "results": os.path.join(output_dir, f"{base}_{run_name}_results.json"),
+        "metrics": os.path.join(output_dir, f"{base}_{run_name}_metrics.json"),
+        "failed": os.path.join(output_dir, f"{base}_{run_name}_failed.json"),
+        "summary": os.path.join(output_dir, f"{base}_{run_name}_summary.txt"),
+    }
+
+
+def _write_json(path: str, data: Any) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -341,6 +508,7 @@ def _run_keysg_rag(
                 "anchor_objects": anchor_objects,
                 "target_vis": target_vis,
                 "anchor_vis": anchor_vis,
+                "top_frame_chunks": top_frame_chunks,
                 "spatial_rel_lines": spatial_rel_lines,
                 "frame_results": frame_results,
                 "context_text": context_text,
@@ -381,6 +549,7 @@ def _run_keysg_rag(
     # ── Phase 3: Process results ──
     logger.info("Phase 3: Processing results")
     debug_file = None
+    scene_id = _scene_base(scene_dir)
     if debug_log_path:
         os.makedirs(os.path.dirname(debug_log_path), exist_ok=True)
         debug_file = open(debug_log_path, "w")
@@ -404,10 +573,12 @@ def _run_keysg_rag(
 
         # Get bbox from scene objects
         bbox = None
+        pred_label = None
         if pred_id is not None:
-            obj = next((o for o in objects if str(o.id) == str(pred_id)), None)
+            obj = obj_by_id.get(str(pred_id))
             if obj is not None:
                 bbox = _extract_bbox_corners(obj)
+                pred_label = getattr(obj, "label", None)
 
         # Debug log
         if debug_file is not None and not isinstance(selection, Exception):
@@ -427,14 +598,22 @@ def _run_keysg_rag(
             )
 
         results.append(
-            {
-                "ann_id": ann.get("ann_id"),
-                "utterance": utterance,
-                "ground_truth_target_id": ann.get("target_id"),
-                "predicted_object_id": pred_id,
-                "bbox_3d": bbox.tolist() if bbox is not None else None,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            }
+            _build_grounding_result_row(
+                scene_id=scene_id,
+                ann=ann,
+                utterance=utterance,
+                parsed_target=p["target_object"],
+                parsed_anchor_objects=p["anchor_objects"],
+                target_vis=p["target_vis"],
+                anchor_vis=p["anchor_vis"],
+                top_frame_chunks=p["top_frame_chunks"],
+                spatial_rel_lines=p["spatial_rel_lines"],
+                selection=selection,
+                pred_id=pred_id,
+                pred_label=pred_label,
+                bbox_3d=bbox.tolist() if bbox is not None else None,
+                timestamp=datetime.utcnow().isoformat() + "Z",
+            )
         )
 
     if debug_file is not None:
@@ -551,6 +730,8 @@ def main() -> None:
     debug_log_path = args.debug_log or os.path.join(
         args.output_dir, f"{base}_debug.log"
     )
+    run_name = "keysg_rag"
+    paths = _result_paths(args.output_dir, args.scene_dir, run_name)
 
     _save_experiment_artifacts(args.output_dir, args, __file__)
 
@@ -569,18 +750,24 @@ def main() -> None:
         debug_log_path=debug_log_path,
         batch_size=args.batch_size,
     )
-    rag_metrics = _evaluate_results(
-        rag_results, annotations, gt_corners_map, iou_thresholds
+    _write_json(paths["results"], rag_results)
+
+    saved_results = _load_json(paths["results"])
+    scored_results, rag_metrics, failed_results = _compute_metrics_from_grounding_results(
+        saved_results, annotations, gt_corners_map, iou_thresholds
     )
-    _write_outputs(
-        args.output_dir,
-        args.scene_dir,
-        "keysg_rag",
-        rag_results,
-        rag_metrics,
-        annotations,
-        gt_corners_map,
-    )
+
+    _write_json(paths["results"], scored_results)
+    _write_json(paths["metrics"], rag_metrics)
+    _write_json(paths["failed"], failed_results)
+
+    summary_text = _format_metrics(rag_metrics)
+    with open(paths["summary"], "w", encoding="utf-8") as handle:
+        handle.write(summary_text + "\n")
+
+    logger.info("Saved grounding results to {}", paths["results"])
+    logger.info("Saved metrics to {}", paths["metrics"])
+    logger.info("\n{}", summary_text)
 
 
 if __name__ == "__main__":

@@ -73,6 +73,12 @@ def _eval_output_paths(
         "failed": os.path.join(output_dir, f"{stem}_failed.json"),
         "summary": os.path.join(output_dir, f"{stem}_summary.txt"),
         "debug": os.path.join(output_dir, f"{stem}_debug.log"),
+        "grounding_llm_log": os.path.join(
+            output_dir, f"{stem}_grounding_llm.log"
+        ),
+        "analysis_llm_log": os.path.join(
+            output_dir, f"{stem}_analysis_llm.log"
+        ),
         "args": os.path.join(output_dir, f"{stem}_args.json"),
         "meta": os.path.join(output_dir, f"{stem}_run_meta.json"),
     }
@@ -871,6 +877,7 @@ def _write_debug_entry(
     *,
     frame_results: Optional[Dict[str, Sequence[Any]]] = None,
     images: Optional[Sequence[Any]] = None,
+    payload_summary: Optional[Dict[str, Any]] = None,
 ) -> None:
     gt_id = str(ann.get("target_id"))
     gt_label = (gt_label_map or {}).get(gt_id, "?")
@@ -890,8 +897,72 @@ def _write_debug_entry(
         for modality, hits in frame_results.items():
             ids = [hit.chunk.id for hit in hits[:5]]
             debug_file.write(f"{modality}: {ids}\n")
+    if payload_summary:
+        debug_file.write("payload:\n")
+        debug_file.write(f"  model: {payload_summary.get('model')}\n")
+        debug_file.write(
+            f"  reasoning_effort: {payload_summary.get('reasoning_effort')}\n"
+        )
+        debug_file.write(f"  detail: {payload_summary.get('detail')}\n")
+        debug_file.write(
+            f"  response_model: {payload_summary.get('response_model')}\n"
+        )
+        debug_file.write("  instructions:\n")
+        for line in str(payload_summary.get("instructions") or "").splitlines():
+            debug_file.write(f"    {line}\n")
+        debug_file.write("  image_paths:\n")
+        for path in payload_summary.get("image_paths") or []:
+            debug_file.write(f"    - {path}\n")
     debug_file.write("context:\n")
     debug_file.write(context_text + "\n\n")
+
+
+def _write_llm_entry(
+    llm_file: TextIO,
+    *,
+    query_idx: int,
+    ann_id: Any,
+    utterance: str,
+    payload_summary: Dict[str, Any],
+    selection: Any,
+    entry_title: str = "Final Grounding Query",
+) -> None:
+    llm_file.write(f"## {entry_title} {query_idx}\n")
+    llm_file.write(f"ann_id: {ann_id}\n")
+    llm_file.write(f"utterance: {utterance}\n")
+    llm_file.write("payload:\n")
+    llm_file.write(f"  model: {payload_summary.get('model')}\n")
+    llm_file.write(
+        f"  reasoning_effort: {payload_summary.get('reasoning_effort')}\n"
+    )
+    llm_file.write(f"  detail: {payload_summary.get('detail')}\n")
+    llm_file.write(f"  response_model: {payload_summary.get('response_model')}\n")
+    llm_file.write("  instructions:\n")
+    for line in str(payload_summary.get("instructions") or "").splitlines():
+        llm_file.write(f"    {line}\n")
+    llm_file.write("  image_paths:\n")
+    for path in payload_summary.get("image_paths") or []:
+        llm_file.write(f"    - {path}\n")
+    llm_file.write("context_text:\n")
+    llm_file.write(str(payload_summary.get("context_text") or "") + "\n")
+    llm_file.write("response:\n")
+    if isinstance(selection, Exception):
+        llm_file.write(json.dumps({"error": str(selection)}, indent=2) + "\n\n")
+        return
+
+    if hasattr(selection, "model_dump"):
+        response_payload = selection.model_dump()
+    elif isinstance(selection, dict):
+        response_payload = selection
+    else:
+        response_payload = {
+            "object_id": getattr(selection, "object_id", None),
+            "reason": getattr(selection, "reason", None),
+            "confidence": getattr(selection, "confidence", None),
+            "rejected_ids": getattr(selection, "rejected_ids", None),
+            "guess_id": getattr(selection, "guess_id", None),
+        }
+    llm_file.write(json.dumps(response_payload, indent=2, ensure_ascii=False) + "\n\n")
 
 
 def _collect_failed_queries(

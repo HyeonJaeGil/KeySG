@@ -203,6 +203,14 @@ class EvalOutputPathsTest(unittest.TestCase):
             paths["debug"],
             "/tmp/nr3d_eval/scene0011_00_with_frames_debug.log",
         )
+        self.assertEqual(
+            paths["grounding_llm_log"],
+            "/tmp/nr3d_eval/scene0011_00_with_frames_grounding_llm.log",
+        )
+        self.assertEqual(
+            paths["analysis_llm_log"],
+            "/tmp/nr3d_eval/scene0011_00_with_frames_analysis_llm.log",
+        )
 
 
 if __name__ == "__main__":

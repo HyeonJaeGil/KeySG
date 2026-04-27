@@ -71,6 +71,7 @@ from eval_helpers import (
     _run_structured_batch as _run_structured_batch_rag,
     # Debug logging
     _write_debug_entry,
+    _write_llm_entry,
     _save_experiment_artifacts,
 )
 
@@ -261,6 +262,8 @@ def _run_keysg_rag(
     gt_corners_map: Optional[Dict[str, np.ndarray]] = None,
     gt_label_map: Optional[Dict[str, str]] = None,
     debug_log_path: Optional[str] = None,
+    grounding_llm_log_path: Optional[str] = None,
+    analysis_llm_log_path: Optional[str] = None,
     batch_size: int = 16,
 ) -> List[Dict[str, Any]]:
     """Run KeySG RAG pipeline with batched LLM calls.
@@ -301,6 +304,15 @@ def _run_keysg_rag(
 
     total = len(annotations) if limit is None else min(limit, len(annotations))
     ann_slice = annotations[:total]
+    analysis_llm_file = None
+    if analysis_llm_log_path:
+        os.makedirs(os.path.dirname(analysis_llm_log_path), exist_ok=True)
+        analysis_llm_file = open(analysis_llm_log_path, "w")
+        analysis_llm_file.write(
+            f"# Query analysis LLM log — {datetime.utcnow().isoformat()}Z\n"
+        )
+        analysis_llm_file.write(f"# Scene: {scene_dir}\n")
+        analysis_llm_file.write("# Model: gpt-5-nano\n\n")
 
     # ── Phase 1a: Batch query analysis ──
     valid_anns: List[Dict[str, Any]] = []
@@ -326,6 +338,24 @@ def _run_keysg_rag(
     # Parse analysis results
     analyses: List[Dict[str, Any]] = []
     for i, result in enumerate(analysis_results):
+        if analysis_llm_file is not None:
+            _write_llm_entry(
+                analysis_llm_file,
+                query_idx=i + 1,
+                ann_id=valid_anns[i].get("ann_id"),
+                utterance=utterances[i],
+                payload_summary={
+                    "model": "gpt-5-nano",
+                    "reasoning_effort": "low",
+                    "detail": "auto",
+                    "response_model": _QuerySchema.__name__,
+                    "instructions": _QUERY_ANALYSIS_INSTRUCTIONS,
+                    "image_paths": [],
+                    "context_text": analysis_prompts[i],
+                },
+                selection=result,
+                entry_title="Query Analysis",
+            )
         if isinstance(result, Exception):
             logger.warning(
                 "Query analysis failed for '{}': {}", utterances[i][:50], result
@@ -440,6 +470,12 @@ def _run_keysg_rag(
 
         # 4. Load frame images (optional)
         images = None
+        image_paths: List[str] = []
+        for chunk in top_frame_chunks[:max_frame_images]:
+            meta = getattr(chunk, "metadata", None) or {}
+            path = meta.get("labeled_image_path") or meta.get("image_path")
+            if path and os.path.isfile(path):
+                image_paths.append(path)
         if include_frame_images:
             images = _load_frame_images(top_frame_chunks, max_frame_images)
 
@@ -456,6 +492,15 @@ def _run_keysg_rag(
                 "frame_results": frame_results,
                 "context_text": context_text,
                 "images": images,
+                "payload_summary": {
+                    "model": rag_model,
+                    "reasoning_effort": "medium",
+                    "detail": "high",
+                    "response_model": ObjectSelection.__name__,
+                    "instructions": _OBJECT_SELECTION_SYSTEM_PROMPT,
+                    "image_paths": image_paths if include_frame_images else [],
+                    "context_text": context_text,
+                },
             }
         )
 
@@ -492,6 +537,7 @@ def _run_keysg_rag(
     # ── Phase 3: Process results ──
     logger.info("Phase 3: Processing results")
     debug_file = None
+    grounding_llm_file = None
     scene_id = _scene_base(scene_dir)
     if debug_log_path:
         os.makedirs(os.path.dirname(debug_log_path), exist_ok=True)
@@ -499,6 +545,14 @@ def _run_keysg_rag(
         debug_file.write(f"# Debug log — {datetime.utcnow().isoformat()}Z\n")
         debug_file.write(f"# Scene: {scene_dir}\n")
         debug_file.write(f"# Model: {rag_model}\n\n")
+    if grounding_llm_log_path:
+        os.makedirs(os.path.dirname(grounding_llm_log_path), exist_ok=True)
+        grounding_llm_file = open(grounding_llm_log_path, "w")
+        grounding_llm_file.write(
+            f"# Final grounding LLM log — {datetime.utcnow().isoformat()}Z\n"
+        )
+        grounding_llm_file.write(f"# Scene: {scene_dir}\n")
+        grounding_llm_file.write(f"# Model: {rag_model}\n\n")
 
     results: List[Dict[str, Any]] = []
     for query_idx, (p, selection) in enumerate(zip(prepared, all_selections), start=1):
@@ -524,6 +578,15 @@ def _run_keysg_rag(
                 pred_label = getattr(obj, "label", None)
 
         # Debug log
+        if grounding_llm_file is not None:
+            _write_llm_entry(
+                grounding_llm_file,
+                query_idx=query_idx,
+                ann_id=ann.get("ann_id"),
+                utterance=utterance,
+                payload_summary=p["payload_summary"],
+                selection=selection,
+            )
         if debug_file is not None and not isinstance(selection, Exception):
             _write_debug_entry(
                 debug_file,
@@ -538,6 +601,7 @@ def _run_keysg_rag(
                 gt_label_map,
                 frame_results=p["frame_results"],
                 images=p["images"],
+                payload_summary=p["payload_summary"],
             )
 
         results.append(
@@ -562,6 +626,12 @@ def _run_keysg_rag(
     if debug_file is not None:
         debug_file.close()
         logger.info("Debug log written to {}", debug_log_path)
+    if grounding_llm_file is not None:
+        grounding_llm_file.close()
+        logger.info("Grounding LLM log written to {}", grounding_llm_log_path)
+    if analysis_llm_file is not None:
+        analysis_llm_file.close()
+        logger.info("Analysis LLM log written to {}", analysis_llm_log_path)
 
     return results
 
@@ -624,6 +694,8 @@ def main() -> None:
         gt_corners_map=gt_corners_map,
         gt_label_map=gt_label_map,
         debug_log_path=debug_log_path,
+        grounding_llm_log_path=paths["grounding_llm_log"],
+        analysis_llm_log_path=paths["analysis_llm_log"],
         batch_size=args.batch_size,
     )
     _write_json(paths["results"], rag_results)

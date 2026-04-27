@@ -1,0 +1,48 @@
+services:
+  keysg:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        ENV_NAME: keysg
+        USER_UID: ${UID:-1000}
+        USER_GID: ${GID:-1000}
+
+    image: keysg:dev
+    container_name: keysg-dev
+    working_dir: /workspace/keysg
+
+    stdin_open: true
+    tty: true
+    ipc: host
+    shm_size: 16gb
+    gpus: all
+
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      HF_HOME: /workspace/keysg/.cache/huggingface
+      TORCH_HOME: /workspace/keysg/.cache/torch
+      XDG_CACHE_HOME: /workspace/keysg/.cache
+      MPLCONFIGDIR: /workspace/keysg/.cache/matplotlib
+      PYTHONPATH: /workspace/keysg
+      REPLICA_DATA_PATH: /workspace/datasets/Replica
+      SCANNET_DATA_PATH: /workspace/datasets/ScanNet
+      HM3D_DATA_PATH: /workspace/datasets/HM3DSem
+
+    volumes:
+      - ..:/workspace/keysg
+      - ${KEYSG_DATASETS_DIR:-../datasets}:/workspace/datasets
+
+    ports:
+      - "${KEYSG_VIS_PORT:-8080}:8080"
+
+    command:
+      [
+        "/bin/bash",
+        "-lc",
+        "git config --global --add safe.directory /workspace/keysg && exec bash"
+      ]

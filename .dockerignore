@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.codex
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+.cache/
+checkpoints/
+datasets/
+output/
+
+keysg.egg-info/

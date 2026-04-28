@@ -190,7 +190,8 @@ def _build_grounding_result_row(
     guess_id = None if isinstance(selection, Exception) else getattr(selection, "guess_id", None)
 
     return {
-        "ann_id": ann.get("ann_id"),
+        "assignmentid": ann.get("assignmentid"),
+        "csv_row_id": ann.get("csv_row_id"),
         "scene_id": ann.get("scene_id") or scene_id,
         "split": ann.get("split") or "all",
         "utterance": utterance,
@@ -342,7 +343,8 @@ def _run_keysg_rag(
             _write_llm_entry(
                 analysis_llm_file,
                 query_idx=i + 1,
-                ann_id=valid_anns[i].get("ann_id"),
+                assignmentid=valid_anns[i].get("assignmentid"),
+                csv_row_id=valid_anns[i].get("csv_row_id"),
                 utterance=utterances[i],
                 payload_summary={
                     "model": "gpt-5-nano",
@@ -561,7 +563,11 @@ def _run_keysg_rag(
 
         # Handle LLM errors
         if isinstance(selection, Exception):
-            logger.warning("LLM error for ann_id={}: {}", ann.get("ann_id"), selection)
+            logger.warning(
+                "LLM error for assignmentid={}: {}",
+                ann.get("assignmentid"),
+                selection,
+            )
             pred_id = None
         else:
             pred_id = selection.object_id
@@ -582,7 +588,8 @@ def _run_keysg_rag(
             _write_llm_entry(
                 grounding_llm_file,
                 query_idx=query_idx,
-                ann_id=ann.get("ann_id"),
+                assignmentid=ann.get("assignmentid"),
+                csv_row_id=ann.get("csv_row_id"),
                 utterance=utterance,
                 payload_summary=p["payload_summary"],
                 selection=selection,

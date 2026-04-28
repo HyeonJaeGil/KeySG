@@ -12,7 +12,8 @@ class Nr3dEvalMetricsTest(unittest.TestCase):
         }
         annotations = [
             {
-                "ann_id": 1,
+                "assignmentid": 101,
+                "csv_row_id": 1,
                 "scene_id": "scene0011_00",
                 "target_id": "24",
                 "split": "all",
@@ -22,7 +23,8 @@ class Nr3dEvalMetricsTest(unittest.TestCase):
                 "mentions_target_class": True,
             },
             {
-                "ann_id": 2,
+                "assignmentid": 202,
+                "csv_row_id": 2,
                 "scene_id": "scene0011_00",
                 "target_id": "25",
                 "split": "all",
@@ -34,13 +36,15 @@ class Nr3dEvalMetricsTest(unittest.TestCase):
         ]
         results = [
             {
-                "ann_id": 1,
+                "assignmentid": 101,
+                "csv_row_id": 1,
                 "ground_truth_target_id": "24",
                 "predicted_object_id": "obj_24",
                 "bbox_3d": gt_bbox.tolist(),
             },
             {
-                "ann_id": 2,
+                "assignmentid": 202,
+                "csv_row_id": 2,
                 "ground_truth_target_id": "25",
                 "predicted_object_id": None,
                 "bbox_3d": None,

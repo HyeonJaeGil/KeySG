@@ -551,7 +551,10 @@ def _iter_records(path: str) -> Iterable[Dict[str, Any]]:
     lower = path.lower()
     if lower.endswith(".csv"):
         with open(path, "r", encoding="utf-8", newline="") as handle:
-            yield from csv.DictReader(handle)
+            for idx, row in enumerate(csv.DictReader(handle)):
+                enriched = dict(row)
+                enriched.setdefault("csv_row_id", idx)
+                yield enriched
         return
 
     with open(path, "r", encoding="utf-8") as handle:
@@ -583,6 +586,29 @@ def _iter_records(path: str) -> Iterable[Dict[str, Any]]:
                     yield value
 
 
+def _normalize_identifier(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    return text
+
+
+def _annotation_join_id(entry: Dict[str, Any]) -> Any:
+    for key in ("assignmentid", "ann_id", "csv_row_id", "annotation_id", "id"):
+        value = _normalize_identifier(entry.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _normalize_annotation(entry: Dict[str, Any], fallback_id: int) -> Optional[Dict[str, Any]]:
     utterance = (
         entry.get("utterance")
@@ -598,14 +624,76 @@ def _normalize_annotation(entry: Dict[str, Any], fallback_id: int) -> Optional[D
         or entry.get("object_id")
         or entry.get("obj_id")
     )
+    assignmentid = _normalize_identifier(
+        entry.get("assignmentid") or entry.get("annotation_id")
+    )
+    csv_row_id = _normalize_identifier(
+        entry.get("csv_row_id") or entry.get("ann_id") or entry.get("id") or fallback_id
+    )
+    normalized = {k: v for k, v in entry.items() if k != "ann_id"}
     return {
-        **entry,
-        "ann_id": entry.get("ann_id") or entry.get("annotation_id") or entry.get("id") or fallback_id,
+        **normalized,
+        "assignmentid": assignmentid,
+        "csv_row_id": csv_row_id,
         "utterance": utterance,
         "target_id": None if target_id is None else str(target_id),
         "split": entry.get("split") or entry.get("eval_split") or "all",
         "scene_id": _entry_scene_id(entry),
     }
+
+
+def _load_csv_scene_annotation_lookup(
+    nr3d_root: str,
+    scene_name: str,
+) -> Tuple[Dict[Any, Dict[str, Any]], Dict[Tuple[str, str], List[Dict[str, Any]]]]:
+    by_row_id: Dict[Any, Dict[str, Any]] = {}
+    by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for path in _walk_candidate_files(nr3d_root, ("nr3d",)):
+        if not path.lower().endswith(".csv"):
+            continue
+        try:
+            for idx, entry in enumerate(_iter_records(path)):
+                if not _scene_matches(entry, scene_name):
+                    continue
+                normalized = _normalize_annotation(entry, idx)
+                if normalized is None:
+                    continue
+                row_id = normalized.get("csv_row_id")
+                if row_id is not None:
+                    by_row_id[row_id] = normalized
+                key = (str(normalized.get("target_id")), str(normalized.get("utterance")))
+                by_key.setdefault(key, []).append(normalized)
+        except Exception as exc:
+            logger.debug("Skipping annotation CSV {}: {}", path, exc)
+    return by_row_id, by_key
+
+
+def _merge_annotation_metadata_from_csv(
+    annotation: Dict[str, Any],
+    csv_by_row_id: Dict[Any, Dict[str, Any]],
+    csv_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    if annotation.get("assignmentid") is not None:
+        return annotation
+
+    matched = None
+    row_id = annotation.get("csv_row_id")
+    if row_id is not None:
+        matched = csv_by_row_id.get(row_id)
+
+    if matched is None:
+        key = (str(annotation.get("target_id")), str(annotation.get("utterance")))
+        matches = csv_by_key.get(key) or []
+        if len(matches) == 1:
+            matched = matches[0]
+
+    if matched is None:
+        return annotation
+
+    merged = {**matched, **annotation}
+    merged["assignmentid"] = matched.get("assignmentid")
+    merged["csv_row_id"] = annotation.get("csv_row_id", matched.get("csv_row_id"))
+    return merged
 
 
 def _normalize_gt_object(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -664,6 +752,14 @@ def _load_scene_annotations(
         nr3d_root, ("nr3d", "annotation", "annot")
     )
     annotations: List[Dict[str, Any]] = []
+    csv_by_row_id: Dict[Any, Dict[str, Any]] = {}
+    csv_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+
+    if preferred and not preferred.lower().endswith(".csv"):
+        csv_by_row_id, csv_by_key = _load_csv_scene_annotation_lookup(
+            nr3d_root,
+            scene_name,
+        )
 
     for path in files:
         try:
@@ -672,6 +768,12 @@ def _load_scene_annotations(
                     continue
                 normalized = _normalize_annotation(entry, len(annotations) + idx)
                 if normalized is not None:
+                    if csv_by_row_id or csv_by_key:
+                        normalized = _merge_annotation_metadata_from_csv(
+                            normalized,
+                            csv_by_row_id,
+                            csv_by_key,
+                        )
                     annotations.append(normalized)
         except Exception as exc:
             logger.debug("Skipping annotation file {}: {}", path, exc)
@@ -722,7 +824,7 @@ def _load_gt_scene_objects(scene_dir: str, nr3d_root: str) -> List[Dict[str, Any
 def _annotation_split_map(annotations: Sequence[Dict[str, Any]]) -> Dict[Any, str]:
     mapping: Dict[Any, str] = {}
     for ann in annotations:
-        mapping[ann.get("ann_id")] = ann.get("split") or "all"
+        mapping[_annotation_join_id(ann)] = ann.get("split") or "all"
     return mapping
 
 
@@ -765,7 +867,7 @@ def _compute_grounding_metrics(
     iou_thresholds: Sequence[float],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
     split_map = _annotation_split_map(annotations)
-    ann_by_id = {ann.get("ann_id"): ann for ann in annotations}
+    ann_by_id = {_annotation_join_id(ann): ann for ann in annotations}
 
     enriched_results: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
@@ -775,7 +877,7 @@ def _compute_grounding_metrics(
     }
 
     for result in results:
-        annotation = ann_by_id.get(result.get("ann_id"))
+        annotation = ann_by_id.get(_annotation_join_id(result))
         flags = _annotation_flags(annotation, result)
         gt_bbox = gt_corners_map.get(str(result.get("ground_truth_target_id")))
         pred_bbox = result.get("bbox_3d")
@@ -789,7 +891,7 @@ def _compute_grounding_metrics(
         enriched_results.append(enriched)
         split_grouped["overall"].append(enriched)
 
-        split = split_map.get(result.get("ann_id"), "all")
+        split = split_map.get(_annotation_join_id(result), "all")
         split_grouped.setdefault(split, []).append(enriched)
 
         for bucket_name, field_name, expected in _LANGUAGE_BUCKETS:
@@ -824,8 +926,8 @@ def _evaluate_results(
     grouped: Dict[str, List[Dict[str, Any]]] = {"overall": []}
 
     for result in results:
-        ann_id = result.get("ann_id")
-        split = split_map.get(ann_id, "all")
+        query_id = _annotation_join_id(result)
+        split = split_map.get(query_id, "all")
         grouped.setdefault(split, []).append(result)
         grouped["overall"].append(result)
 
@@ -885,7 +987,8 @@ def _write_debug_entry(
     iou = strict_box3d_iou(bbox, gt_bbox) if bbox is not None and gt_bbox is not None else 0.0
 
     debug_file.write(f"## Query {query_idx}\n")
-    debug_file.write(f"ann_id: {ann.get('ann_id')}\n")
+    debug_file.write(f"assignmentid: {ann.get('assignmentid')}\n")
+    debug_file.write(f"csv_row_id: {ann.get('csv_row_id')}\n")
     debug_file.write(f"utterance: {utterance}\n")
     debug_file.write(f"gt_target_id: {gt_id} ({gt_label})\n")
     debug_file.write(f"predicted_id: {pred_id}\n")
@@ -921,14 +1024,16 @@ def _write_llm_entry(
     llm_file: TextIO,
     *,
     query_idx: int,
-    ann_id: Any,
+    assignmentid: Any,
+    csv_row_id: Any,
     utterance: str,
     payload_summary: Dict[str, Any],
     selection: Any,
     entry_title: str = "Final Grounding Query",
 ) -> None:
     llm_file.write(f"## {entry_title} {query_idx}\n")
-    llm_file.write(f"ann_id: {ann_id}\n")
+    llm_file.write(f"assignmentid: {assignmentid}\n")
+    llm_file.write(f"csv_row_id: {csv_row_id}\n")
     llm_file.write(f"utterance: {utterance}\n")
     llm_file.write("payload:\n")
     llm_file.write(f"  model: {payload_summary.get('model')}\n")
@@ -971,7 +1076,7 @@ def _collect_failed_queries(
     gt_corners_map: Dict[str, np.ndarray],
     iou_threshold: float = 0.1,
 ) -> List[Dict[str, Any]]:
-    ann_by_id = {ann.get("ann_id"): ann for ann in annotations}
+    ann_by_id = {_annotation_join_id(ann): ann for ann in annotations}
     failed: List[Dict[str, Any]] = []
     for result in results:
         gt_bbox = gt_corners_map.get(str(result.get("ground_truth_target_id")))
@@ -981,7 +1086,7 @@ def _collect_failed_queries(
             failed.append(
                 {
                     "result": result,
-                    "annotation": ann_by_id.get(result.get("ann_id")),
+                    "annotation": ann_by_id.get(_annotation_join_id(result)),
                     "iou": iou,
                 }
             )

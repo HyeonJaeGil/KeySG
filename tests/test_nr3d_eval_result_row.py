@@ -21,7 +21,13 @@ class GroundingResultRowTest(unittest.TestCase):
     def test_row_keeps_visualization_friendly_retrieval_context(self) -> None:
         module = _load_module()
 
-        ann = {"ann_id": 7, "target_id": "24", "scene_id": "scene0011_00", "split": "all"}
+        ann = {
+            "assignmentid": 23051,
+            "csv_row_id": 2699,
+            "target_id": "24",
+            "scene_id": "scene0011_00",
+            "split": "all",
+        }
         frame_chunk = SimpleNamespace(
             id="frame_0_0_26",
             content="frame description",
@@ -69,6 +75,8 @@ class GroundingResultRowTest(unittest.TestCase):
         self.assertEqual(row["predicted_label"], "wood-framed window")
         self.assertEqual(row["confidence"], 0.82)
         self.assertEqual(row["reason"], "best semantic and spatial match")
+        self.assertEqual(row["assignmentid"], 23051)
+        self.assertEqual(row["csv_row_id"], 2699)
         self.assertEqual(row["parsed_target"], "window")
         self.assertEqual(row["parsed_anchor_objects"], ["front doors"])
         self.assertEqual(row["retrieval"]["target_candidates"][0]["id"], "obj_1_bee")

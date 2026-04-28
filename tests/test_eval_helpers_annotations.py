@@ -8,11 +8,73 @@ import unittest
 from eval_helpers import (
     _eval_output_paths,
     _load_scene_annotations,
+    _normalize_annotation,
     _resolve_nr3d_root,
 )
 
 
 class SceneSpecificAnnotationsTest(unittest.TestCase):
+    def test_normalize_annotation_uses_assignmentid_and_renames_legacy_ann_id(self) -> None:
+        normalized = _normalize_annotation(
+            {
+                "scan_id": "scene0011_00",
+                "utterance": "from scene file",
+                "target_id": "2",
+                "assignmentid": "41359",
+                "ann_id": 40567,
+            },
+            fallback_id=17,
+        )
+
+        assert normalized is not None
+        self.assertEqual(normalized["assignmentid"], 41359)
+        self.assertEqual(normalized["csv_row_id"], 40567)
+        self.assertNotIn("ann_id", normalized)
+
+    def test_scene_file_can_recover_assignmentid_from_shared_csv(self) -> None:
+        scene_name = "scene0011_00"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            queries_dir = root / "queries_by_scene"
+            queries_dir.mkdir()
+
+            with open(root / "nr3d.csv", "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["assignmentid", "scan_id", "utterance", "target_id"],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "assignmentid": "9001",
+                        "scan_id": scene_name,
+                        "utterance": "from scene file",
+                        "target_id": "2",
+                    }
+                )
+
+            with open(queries_dir / f"{scene_name}.json", "w", encoding="utf-8") as handle:
+                json.dump(
+                    [
+                        {
+                            "scan_id": scene_name,
+                            "utterance": "from scene file",
+                            "target_id": "2",
+                            "ann_id": 0,
+                        }
+                    ],
+                    handle,
+                )
+
+            annotations = _load_scene_annotations(
+                f"/unused/path/{scene_name}",
+                nr3d_root=str(root),
+            )
+
+        self.assertEqual(annotations[0]["assignmentid"], 9001)
+        self.assertEqual(annotations[0]["csv_row_id"], 0)
+
     def test_prefers_unfiltered_scene_file_by_default(self) -> None:
         scene_name = "scene0011_00"
 
@@ -46,7 +108,8 @@ class SceneSpecificAnnotationsTest(unittest.TestCase):
                             "scan_id": scene_name,
                             "utterance": "from filtered scene file",
                             "target_id": "2",
-                            "ann_id": 101,
+                            "assignmentid": 101,
+                            "csv_row_id": 7,
                         }
                     ],
                     handle,
@@ -94,7 +157,8 @@ class SceneSpecificAnnotationsTest(unittest.TestCase):
                             "scan_id": scene_name,
                             "utterance": "from filtered scene file",
                             "target_id": "2",
-                            "ann_id": 101,
+                            "assignmentid": 101,
+                            "csv_row_id": 7,
                         }
                     ],
                     handle,
@@ -109,7 +173,8 @@ class SceneSpecificAnnotationsTest(unittest.TestCase):
         self.assertEqual(len(annotations), 1)
         self.assertEqual(annotations[0]["utterance"], "from filtered scene file")
         self.assertEqual(annotations[0]["target_id"], "2")
-        self.assertEqual(annotations[0]["ann_id"], 101)
+        self.assertEqual(annotations[0]["assignmentid"], 101)
+        self.assertEqual(annotations[0]["csv_row_id"], 7)
 
     def test_prefers_queries_by_scene_file_over_shared_csv(self) -> None:
         scene_name = "scene0011_00"
@@ -140,7 +205,8 @@ class SceneSpecificAnnotationsTest(unittest.TestCase):
                             "scan_id": scene_name,
                             "utterance": "from scene file",
                             "target_id": "2",
-                            "ann_id": 99,
+                            "assignmentid": 99,
+                            "csv_row_id": 4,
                         }
                     ],
                     handle,
@@ -154,7 +220,8 @@ class SceneSpecificAnnotationsTest(unittest.TestCase):
         self.assertEqual(len(annotations), 1)
         self.assertEqual(annotations[0]["utterance"], "from scene file")
         self.assertEqual(annotations[0]["target_id"], "2")
-        self.assertEqual(annotations[0]["ann_id"], 99)
+        self.assertEqual(annotations[0]["assignmentid"], 99)
+        self.assertEqual(annotations[0]["csv_row_id"], 4)
 
 
 class Nr3dRootResolutionTest(unittest.TestCase):

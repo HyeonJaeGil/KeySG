@@ -16,7 +16,7 @@ from eval_helpers import _write_debug_entry, _write_llm_entry
 class Nr3dEvalDebugLogTest(unittest.TestCase):
     def test_debug_log_includes_readable_payload_summary(self) -> None:
         debug_file = io.StringIO()
-        ann = {"ann_id": 3424, "target_id": "15"}
+        ann = {"assignmentid": 5821, "csv_row_id": 3424, "target_id": "15"}
         selection = SimpleNamespace(confidence=0.9, reason="best match")
         gt_corners_map = {"15": np.zeros((8, 3), dtype=float)}
         gt_label_map = {"15": "trash can"}
@@ -82,7 +82,8 @@ class Nr3dEvalDebugLogTest(unittest.TestCase):
         _write_llm_entry(
             llm_file,
             query_idx=3,
-            ann_id=3424,
+            assignmentid=5821,
+            csv_row_id=3424,
             utterance="This trash can is next to a large black television.",
             payload_summary={
                 "model": "gpt-5-mini",
@@ -99,7 +100,8 @@ class Nr3dEvalDebugLogTest(unittest.TestCase):
         log_text = llm_file.getvalue()
 
         self.assertIn("## Final Grounding Query 3", log_text)
-        self.assertIn("ann_id: 3424", log_text)
+        self.assertIn("assignmentid: 5821", log_text)
+        self.assertIn("csv_row_id: 3424", log_text)
         self.assertIn("payload:", log_text)
         self.assertIn("context_text:", log_text)
         self.assertIn("response:", log_text)
@@ -119,7 +121,8 @@ class Nr3dEvalDebugLogTest(unittest.TestCase):
         _write_llm_entry(
             llm_file,
             query_idx=3,
-            ann_id=3424,
+            assignmentid=5821,
+            csv_row_id=3424,
             utterance="This trash can is next to a large black television.",
             payload_summary={
                 "model": "gpt-5-nano",

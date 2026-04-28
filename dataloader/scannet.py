@@ -38,10 +38,11 @@ class ScanNetDataset:
         
         # Get image shape
         sample_image = self._load_image(self.data_list[0][0])
+        sample_depth = self._load_depth(self.data_list[0][1])
         self.rgb_H = sample_image.shape[0]
         self.rgb_W = sample_image.shape[1]
-        self.depth_H = self.depth_intrinsics.shape[0]
-        self.depth_W = self.depth_intrinsics.shape[1]
+        self.depth_H = sample_depth.shape[0]
+        self.depth_W = sample_depth.shape[1]
         self.name = "ScanNet"
         self.scene_name = self.root_dir.split("/")[-1]
 

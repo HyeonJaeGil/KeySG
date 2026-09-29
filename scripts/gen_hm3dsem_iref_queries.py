@@ -8,7 +8,8 @@ Every query has exactly one answer inside its room:
   * target/anchor classes exclude structure and vague labels
   * anchors are the only object of their class in the room
   * no same-class distractor satisfies a *relaxed* version of the relation
-  * superlatives need a distance margin to the runner-up
+  * superlatives need a clear winner: >= MARGIN and >= RATIO x the runner-up distance, same winner
+    by surface distance; for a same-class pair only one of closest/farthest is kept
 Rooms labelled empty/unknown are skipped.
 
 Cross-room tier (does the same statement also fit elsewhere in the scene?):
@@ -38,6 +39,11 @@ EXCLUDE = {
     "ceiling light fixture connection", "wall panel", "parapet", "pipe", "stairs", "handrail",
     "stairs railing", "railing", "baseboard", "column", "pillar", "window glass", "door hinge",
     "ceiling molding", "skirting board", "floor mat frame", "door knob",
+    "air duct", "air vent", "vent", "ventilation", "ceiling vent", "ceiling duct", "ceiling dome",
+    "bath wall", "compound wall", "fireplace wall", "recessed wall", "stair wall", "shower ceiling",
+    "shower floor", "shower pipe", "shower door frame", "door/window frame", "frame", "mirror frame",
+    "painting frame", "bedframe", "curtain rail", "panel", "paneling", "board", "doorstep", "step",
+    "stair", "staircase handrail", "staircase trim",
     # vague
     "unknown", "clutter", "object", "misc", "stuff", "appliance", "device", "decoration",
     "bathroom accessory", "bathroom utensil", "washing stuff", "basket of something", "wall electronics",
@@ -130,7 +136,8 @@ def inside(t, a, relaxed=False):
 
 BINARY = {"near": near, "above": above, "below": below, "on": on, "in": inside}
 ORDINAL = {"closest": (0, False), "farthest": (0, True)}  # superlatives; 2nd/3rd dropped as unnatural
-MARGIN = 0.3  # m, ordinal distance gap to neighbours
+MARGIN = 0.5  # m, superlative winner vs runner-up centre-distance gap
+RATIO = 1.5  # superlative runner-up / winner distance ratio (farthest: winner / runner-up)
 
 
 def between(t, a1, a2, relaxed=False):
@@ -170,10 +177,12 @@ def region_queries(objs, rng):
                 for t in group:
                     if fn(t, a) and not any(fn(d, a, relaxed=True) for d in group if d is not t):
                         add(t, rel, [a])
-            for rel, (_, far) in ORDINAL.items():
-                win = superlative_winner(group, a, far)
-                if win is not None:
-                    add(group[win], rel, [a])
+            wins = [(rel, superlative_winner(group, a, far)) for rel, (_, far) in ORDINAL.items()]
+            wins = [(rel, w) for rel, w in wins if w is not None]
+            if len(group) == 2 and len(wins) == 2:  # closest/farthest of a pair are mirror images
+                wins = [rng.choice(wins)]
+            for rel, win in wins:
+                add(group[win], rel, [a])
     for a1, a2 in combinations(anchors, 2):
         for cls, group in by_cls.items():
             if cls in (a1.cls, a2.cls):
@@ -202,11 +211,19 @@ def holds(room_cls, rel, tcls, acls):
 
 
 def superlative_winner(group, a, far):
-    """Index of the object in `group` closest (far=False) / farthest to `a`, if it wins by MARGIN."""
+    """Index of the object in `group` closest (far=False) / farthest to `a`, if it wins clearly:
+    centre-distance gap >= MARGIN, runner-up/winner distance ratio >= RATIO, and the same winner
+    under surface (AABB gap) distance."""
     if len(group) < 2:
         return None
     order = sorted(((dist(t, a), i) for i, t in enumerate(group)), reverse=far)
-    return order[0][1] if abs(order[0][0] - order[1][0]) >= MARGIN else None
+    (d1, win), (d2, _) = order[0], order[1]
+    near_d, far_d = (d2, d1) if far else (d1, d2)
+    if abs(d1 - d2) < MARGIN or far_d < RATIO * max(near_d, 1e-6):
+        return None
+    gaps = [gap(t, a) for t in group]
+    surface_win = max(range(len(group)), key=gaps.__getitem__) if far else min(range(len(group)), key=gaps.__getitem__)
+    return win if surface_win == win else None
 
 
 def adjacency(regions):

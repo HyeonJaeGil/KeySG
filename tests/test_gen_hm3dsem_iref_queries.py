@@ -36,6 +36,16 @@ def test_unique_answers_and_filters():
     assert len(g.sample(qs, 3, random.Random(0))) == 3
 
 
+def test_superlative_needs_clear_winner():
+    def box(i, x):
+        return g.Box(obj(i, "chair", [x, 0.4, 0], [0.4, 0.8, 0.4]))
+
+    anchor = g.Box(obj(0, "table", [0, 0.4, 0], [0.2, 0.8, 0.2]))
+    assert g.superlative_winner([box(1, 1.0), box(2, 1.2)], anchor, far=False) is None  # too close to call
+    assert g.superlative_winner([box(1, 1.0), box(2, 2.0)], anchor, far=False) == 0
+    assert g.superlative_winner([box(1, 1.0), box(2, 2.0)], anchor, far=True) == 1
+
+
 def test_same_label_rival_gets_room_descriptor():
     def bev(x0):
         return [[x0, 0, 0], [x0 + 3, 0, 0], [x0 + 3, 0, 3], [x0, 0, 3]]

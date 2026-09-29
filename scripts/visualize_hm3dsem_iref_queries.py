@@ -42,7 +42,12 @@ class Viewer:
     # ---------- data ----------
     def cloud(self, path):
         if path not in self.cache:
-            pc = o3d.io.read_point_cloud(str(path))
+            if path.exists():
+                pc = o3d.io.read_point_cloud(str(path))
+            else:  # some scenes ship no scene_rgb.ply: stitch the per-room clouds instead
+                pc = o3d.geometry.PointCloud()
+                for f in sorted((path.parent / "regions").glob("*.ply")):
+                    pc += o3d.io.read_point_cloud(str(f))
             pts, cols = np.asarray(pc.points, np.float32), np.asarray(pc.colors, np.float32)
             if len(pts) > self.args.max_points:  # ponytail: random subsample, voxel-downsample if detail matters
                 idx = np.random.default_rng(0).choice(len(pts), self.args.max_points, replace=False)
@@ -211,15 +216,18 @@ class Viewer:
     def objects(self, scene):
         key = ("objects", scene)
         if key not in self.cache:
-            info = json.loads((self.args.data_root / scene / "scene_info.json").read_text())
+            info = json.loads((self.args.gt_root / scene / "scene_info.json").read_text())
             self.cache[key] = {o["id"]: o for o in info["objects"]}
         return self.cache[key]
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data_root", type=Path, default=Path("/mnt/Backup2nd/Dataset/hm3d_val"))
-    p.add_argument("--query_dir", type=Path, default=Path("/mnt/Backup2nd/Dataset/hm3d_val/iref_style_queries"))
+    p.add_argument("--data_root", type=Path, default=Path("/mnt/Backup2nd/Dataset/hm3d_val"),
+                   help="point clouds: <scene>/scene_rgb.ply and <scene>/regions/<id>.ply")
+    p.add_argument("--gt_root", type=Path, default=Path("/mnt/Backup2nd/Dataset/hm3dsem/val"),
+                   help="GT the queries were generated from: <scene>/scene_info.json")
+    p.add_argument("--query_dir", type=Path, default=Path("/mnt/Backup2nd/Dataset/hm3dsem/iref_room_queries"))
     p.add_argument("--suffix", default="sampled150", help="query file = <scene>_<suffix>.json (e.g. all)")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8080)

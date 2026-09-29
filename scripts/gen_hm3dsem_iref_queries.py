@@ -1,8 +1,9 @@
 """Generate IRef-VLA-style, room-conditioned referential queries for HM3DSem walks.
 
-Input : <data_root>/<scene>/scene_info.json (HOV-SG GT; Y-up, AABBs, region labels)
-Output: <out_dir>/<scene>_all.json         every valid (target, relation, anchors) combo
-        <out_dir>/<scene>_sampled<N>.json  diversity-first subset
+Input : <data_root>/<split>/<scene>/scene_info.json (HOV-SG GT; Y-up, AABBs, region labels)
+Output: <data_root>/<out_name>.json      self-describing benchmark file (sampled subset, all scenes)
+        <data_root>/<out_name>_all.json  same format, every valid candidate
+        <data_root>/<out_name>/<scene>_{all,sampled<N>}.json  raw per-scene lists (used by the viewer)
 
 Every query has exactly one answer inside its room:
   * target/anchor classes exclude structure and vague labels
@@ -373,28 +374,151 @@ def sample(queries, n, rng):
     return out
 
 
+SPEC = {
+    "task": "3D referential grounding: given `query` and the scene's posed RGB-D walk (rgb/, depth/, pose/), "
+            "return the single referred object (3D box or instance). Exactly one GT object per query.",
+    "coordinate_frame": "Habitat world frame of scene_info.json: Y-up, metres; AABBs are world-axis-aligned.",
+    "query_format": "\"In the <room label>[ <room descriptor>], the <target> that is/are <relation phrase> "
+                    "the <anchor>[ and the <anchor2>]\"; `query_without_room` drops the room clause "
+                    "(for room-conditioning ablations; it may be ambiguous by design for T2/T3).",
+    "gt": "`gt_objects` follows hm3dsem/long_queries_obj_room.json (hier_id = floor_region_object, pcd relative "
+          "to data_root). Anchors/distractors/room-descriptor objects are listed by object_id of the same scene_info.",
+    "uniqueness": [
+        "target and anchor classes exclude structure/parts/vague labels (see `excluded_classes`) and objects < 5 cm",
+        "each anchor is the only object of its class in the room",
+        "no other same-class object in the room satisfies a relaxed version of the relation",
+        f"closest/farthest: winner beats runner-up by >= {MARGIN} m and >= {RATIO}x distance, same winner by "
+        "surface (AABB-gap) distance",
+        "rooms labelled empty/unknown are never used",
+    ],
+    "relations": {
+        "near": "AABB gap <= 0.5 m (distractors must be > 1.0 m)",
+        "above / below": "vertical gap 0.1-1.5 m and >= 30% horizontal footprint overlap",
+        "on": "target bottom within 0.1 m of anchor top, >= 70% of target footprint over the anchor",
+        "in": ">= 90% of target AABB volume inside anchor AABB, anchor >= 3x target volume",
+        "between": "target centre projects to 20-80% of the anchor-anchor segment (floor plane), "
+                   "offset <= min(0.25 x length, 1 m); anchors 0.5-5 m apart",
+        "closest / farthest": "centre distance ranking among same-class objects in the room",
+    },
+    "relation_groups": {"proximity": ["near"], "vertical": ["above", "below"], "support": ["on"],
+                        "containment": ["in"], "between": ["between"], "superlative": ["closest", "farthest"]},
+    "tiers": {
+        "T0": "target class occurs only in this room",
+        "T1": "target class occurs in other rooms but the statement holds only here",
+        "T2": "statement also holds in a room with a different label -> room label disambiguates",
+        "T3": "statement also holds in a room with the same label -> `room_descriptor` disambiguates",
+    },
+    "room_descriptor": "T3 only. 'objects': salient class(es) present in this room and in no other same-label "
+                       "room; 'adjacent': a room label that only this same-label room borders (floor-plan "
+                       f"boundary <= {ADJ_DIST} m, same floor).",
+    "rival_rooms": "other rooms (any label) where the room-less statement also holds",
+    "suggested_evaluation": {
+        "primary": "top-1 accuracy: predicted object == gt (instance id match), or 3D IoU >= 0.25 / 0.5 "
+                   "against gt AABB when the method outputs boxes",
+        "breakdowns": ["tier (T0-T3)", "relation_group", "room_descriptor.type", "has in-room distractor"],
+        "room_ablation": "run `query` and `query_without_room`; the T2/T3 gap measures use of room information",
+    },
+}
+
+
+def ply_points(path):
+    """Vertex count from a PLY header (0 if missing)."""
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                if line.startswith(b"element vertex"):
+                    return int(line.split()[-1])
+                if line.startswith(b"end_header"):
+                    break
+    except FileNotFoundError:
+        pass
+    return 0
+
+
+def gt_entry(o, rooms, rel_scene, root):
+    pcd = f"{rel_scene}/objects/{o['id']}.ply"
+    return {
+        "floor_id": o.get("floor_id"), "region_id": o["region_id"], "object_id": o["id"],
+        "hier_id": f"{o.get('floor_id')}_{o['region_id']}_{o['id']}", "category": o["category"],
+        "room_category": rooms.get(o["region_id"], {}).get("category"),
+        "aabb_center": o["aabb_center"], "aabb_dims": o["aabb_dims"],
+        "obb_center": o.get("obb_center"), "obb_dims": o.get("obb_dims"), "obb_rotation": o.get("obb_rotation"),
+        "n_points": ply_points(root / pcd), "pcd": pcd,
+    }
+
+
+def bundle(per_scene, root, split, n, seed, sampled):
+    queries = []
+    for scene, (info, qs) in per_scene.items():
+        objs = {o["id"]: o for o in info["objects"]}
+        rooms = {r["id"]: r for r in info["regions"]}
+        rel_scene = f"{split}/{scene}"
+        for i, q in enumerate(qs):
+            stmt = q["statement"]
+            queries.append({
+                "id": f"{scene}/{i:04d}", "scene": scene, "query": q["query"],
+                "query_without_room": stmt[0].upper() + stmt[1:],
+                "relation": q["relation"], "relation_group": GROUPS[q["relation"]], "tier": q["tier"],
+                "region_id": q["region_id"], "region_label": q["region_label"], "floor_id": q["floor_id"],
+                "room_descriptor": q["room_descriptor"], "rival_rooms": q["rival_rooms"],
+                "gt_objects": [gt_entry(objs[q["target_id"]], rooms, rel_scene, root)],
+                "anchors": [{"object_id": a["id"], "category": a["class"]} for a in q["anchors"]],
+                "distractor_ids": q["distractor_ids"],
+            })
+    c = lambda key: dict(sorted(Counter(q[key] for q in queries).items()))
+    return {
+        "name": "HM3DSem IRef-style room-conditioned referential queries",
+        "subset": f"sampled {n}/scene (tier-balanced, then relation group)" if sampled else "all valid candidates",
+        "split": split, "data_root": str(root), "scenes": list(per_scene),
+        "scene_layout": {k: f"{split}/<scene>/{v}" for k, v in {
+            "scene_info": "scene_info.json", "object_pcd": "objects/<object_id>.ply",
+            "region_pcd": "regions/<region_id>.ply", "rgb": "rgb/", "depth": "depth/", "pose": "pose/"}.items()},
+        "generator": {"script": "scripts/gen_hm3dsem_iref_queries.py (KeySG repo)", "seed": seed},
+        "spec": SPEC,
+        "excluded_classes": sorted(EXCLUDE),
+        "num_queries": len(queries),
+        "stats": {"per_scene": c("scene"), "tier": c("tier"), "relation": c("relation"),
+                  "relation_group": c("relation_group"),
+                  "with_in_room_distractor": sum(bool(q["distractor_ids"]) for q in queries),
+                  "room_descriptor": dict(Counter(q["room_descriptor"]["type"] for q in queries
+                                                  if q["room_descriptor"])),
+                  "num_target_categories": len({q["gt_objects"][0]["category"] for q in queries})},
+        "queries": queries,
+    }
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data_root", type=Path, default=Path("/mnt/Backup2nd/Dataset/hm3d_val"))
-    p.add_argument("--out_dir", type=Path, default=Path("/mnt/Backup2nd/Dataset/hm3d_val/iref_style_queries"))
+    p.add_argument("--data_root", type=Path, default=Path("/mnt/Backup2nd/Dataset/hm3dsem"))
+    p.add_argument("--split", default="val")
+    p.add_argument("--out_name", default="iref_room_queries",
+                   help="writes <data_root>/<out_name>.json (sampled), <out_name>_all.json, and per-scene "
+                        "files under <data_root>/<out_name>/")
     p.add_argument("--scenes", nargs="*", default=SCENES)
     p.add_argument("--n", type=int, default=150)
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    per_dir = args.data_root / args.out_name
+    per_dir.mkdir(parents=True, exist_ok=True)
+    sampled, full = {}, {}
     for scene in args.scenes:
         rng = random.Random(args.seed)
-        info = json.loads((args.data_root / scene / "scene_info.json").read_text())
+        info = json.loads((args.data_root / args.split / scene / "scene_info.json").read_text())
         qs = generate(info, rng)
         sub = sample(qs, args.n, rng)
-        (args.out_dir / f"{scene}_all.json").write_text(json.dumps(qs))
-        (args.out_dir / f"{scene}_sampled{args.n}.json").write_text(json.dumps(sub, indent=1))
+        full[scene], sampled[scene] = (info, qs), (info, sub)
+        (per_dir / f"{scene}_all.json").write_text(json.dumps(qs))
+        (per_dir / f"{scene}_sampled{args.n}.json").write_text(json.dumps(sub, indent=1))
         print(f"{scene}: all={len(qs)} sampled={len(sub)} rooms={len({q['region_id'] for q in sub})} "
               f"target_cls={len({q['target_class'] for q in sub})} "
               f"with_distractors={sum(bool(q['distractor_ids']) for q in sub)} "
               f"group={dict(sorted(Counter(GROUPS[q['relation']] for q in sub).items()))} "
               f"tier={dict(sorted(Counter(q['tier'] for q in sub).items()))} "
               f"all_tier={dict(sorted(Counter(q['tier'] for q in qs).items()))}")
+    for name, data, is_sampled in [(args.out_name, sampled, True), (f"{args.out_name}_all", full, False)]:
+        out = args.data_root / f"{name}.json"
+        out.write_text(json.dumps(bundle(data, args.data_root, args.split, args.n, args.seed, is_sampled), indent=1))
+        print("wrote", out)
 
 
 if __name__ == "__main__":

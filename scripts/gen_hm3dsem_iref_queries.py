@@ -170,14 +170,10 @@ def region_queries(objs, rng):
                 for t in group:
                     if fn(t, a) and not any(fn(d, a, relaxed=True) for d in group if d is not t):
                         add(t, rel, [a])
-            ds = sorted((dist(t, a), i) for i, t in enumerate(group))
-            for rel, (k, far) in ORDINAL.items():
-                if len(group) < k + 2:  # k-th needs at least one object beyond it
-                    continue
-                order = ds[::-1] if far else ds
-                gaps = [abs(order[k][0] - order[j][0]) for j in (k - 1, k + 1) if 0 <= j < len(order)]
-                if min(gaps) >= MARGIN:
-                    add(group[order[k][1]], rel, [a])
+            for rel, (_, far) in ORDINAL.items():
+                win = superlative_winner(group, a, far)
+                if win is not None:
+                    add(group[win], rel, [a])
     for a1, a2 in combinations(anchors, 2):
         for cls, group in by_cls.items():
             if cls in (a1.cls, a2.cls):
@@ -201,7 +197,16 @@ def holds(room_cls, rel, tcls, acls):
         return any(BINARY[rel](t, a) for t in ts for a in room_cls[acls[0]])
     if rel == "between":
         return any(between(t, a1, a2) for t in ts for a1 in room_cls[acls[0]] for a2 in room_cls[acls[1]])
-    return len(ts) >= 2  # superlative: a same-class group to rank exists
+    # superlative: same test as in-room generation (a clear winner by MARGIN) for some anchor
+    return any(superlative_winner(ts, a, ORDINAL[rel][1]) is not None for a in room_cls[acls[0]])
+
+
+def superlative_winner(group, a, far):
+    """Index of the object in `group` closest (far=False) / farthest to `a`, if it wins by MARGIN."""
+    if len(group) < 2:
+        return None
+    order = sorted(((dist(t, a), i) for i, t in enumerate(group)), reverse=far)
+    return order[0][1] if abs(order[0][0] - order[1][0]) >= MARGIN else None
 
 
 def adjacency(regions):

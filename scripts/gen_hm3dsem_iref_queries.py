@@ -404,7 +404,8 @@ SPEC = {
           "to data_root). The GT box is `aabb_center`/`aabb_dims` (= scene_info); do not recompute it from the pcd "
           "(the ply extent differs by up to ~0.3 m). obb_* currently equals the AABB (identity rotation).",
     "output_and_scoring": {
-        "box_setting": "predict a world-frame AABB; score 3D axis-aligned IoU vs the GT AABB at 0.25 and 0.5.",
+        "box_setting": "predict one world-frame AABB (top-1); score 3D axis-aligned IoU vs the GT AABB: "
+                       "Acc@0.1 (headline, same threshold as Nr3D in KeySG) and Acc@0.25.",
         "instance_setting": "only for methods that select among GT instances (oracle segmentation): candidates are "
                             "ALL scene_info objects of the scene (unfiltered); accuracy = predicted object_id == gt "
                             "object_id. Report separately.",
@@ -450,7 +451,7 @@ SPEC = {
                        f"boundary <= {ADJ_DIST} m, same floor).",
     "rival_rooms": "other rooms (any label) where the room-less statement also holds",
     "suggested_evaluation": {
-        "primary": "Acc@0.25 / Acc@0.5 (box setting); Acc@id in the instance setting",
+        "primary": "Acc@0.1 and Acc@0.25 (box setting); Acc@id in the instance setting",
         "breakdowns": ["tier (T0-T3)", "relation_group", "room_descriptor.type", "has in-room distractor",
                        "scene"],
         "diagnostics": ["wrong-room rate: prediction lies in a `rival_rooms` region",
@@ -506,7 +507,9 @@ def bundle(per_scene, root, split, n, seed, sampled):
             })
     c = lambda key: dict(sorted(Counter(q[key] for q in queries).items()))
     return {
-        "name": "HM3DSem IRef-style room-conditioned referential queries",
+        "name": "HM3DSem-RoomRef",
+        "description": "IRef-style, room-conditioned referential grounding queries on the 8 HOV-SG HM3DSem val walks "
+                       "(companion to HM3DSem-HOR = long_queries_obj_room[_floor].json).",
         "subset": f"sampled {n}/scene (tier-balanced, then relation group)" if sampled else "all valid candidates",
         "split": split, "data_root": str(root), "scenes": list(per_scene),
         "scene_layout": {k: f"{split}/<scene>/{v}" for k, v in {

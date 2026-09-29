@@ -375,30 +375,60 @@ def sample(queries, n, rng):
 
 
 SPEC = {
-    "task": "3D referential grounding: given `query` and the scene's posed RGB-D walk (rgb/, depth/, pose/), "
-            "return the single referred object (3D box or instance). Exactly one GT object per query.",
+    "task": "3D referential grounding: given `query` and the scene's posed RGB-D walk, return the single referred "
+            "object as a 3D box (or an instance). Exactly one GT object per query.",
+    "official_test_set": "iref_room_queries.json (1200 = 150/scene). iref_room_queries_all.json is the candidate "
+                         "pool it was sampled from (same format), for analysis only.",
+    "method_inputs": {
+        "allowed": "val/<scene>/rgb/*.png, depth/*.png, pose/*.txt (+ the intrinsics below) and the query text.",
+        "gt_only_do_not_feed_to_methods": "scene_info.json, objects/, regions/, scene_panoptic.ply, semantic/ "
+                                          "(per-pixel GT instance ids), and every per-query field other than "
+                                          "`query` / `query_without_room`.",
+        "rgb": "1080x720 PNG.",
+        "depth": "uint16 PNG, millimetres (divide by 1000); 0 = invalid.",
+        "intrinsics": "pinhole, HFOV 90 deg: fx = fy = W/2 = 540, cx = 540, cy = 360 (same for depth).",
+        "pose": "pose/<frame>.txt: 16 numbers, row-major 4x4 camera-to-world, OpenGL camera axes (x right, y up, "
+                "looking down -z). For OpenCV back-projection use T @ diag(1,-1,-1,1); verified: back-projected "
+                "depth lands within ~1 cm of the scene cloud.",
+        "floors": "multi-floor scenes (2-3 levels in 6/8); queries never name the floor on purpose - floor/level "
+                  "structure must come from the method's own reconstruction.",
+    },
     "coordinate_frame": "Habitat world frame of scene_info.json: Y-up, metres; AABBs are world-axis-aligned.",
     "query_format": "\"In the <room label>[ <room descriptor>], the <target> that is/are <relation phrase> "
                     "the <anchor>[ and the <anchor2>]\"; `query_without_room` drops the room clause "
                     "(for room-conditioning ablations; it may be ambiguous by design for T2/T3).",
+    "relation_phrases": {**PHRASES, "room_adjacency": ADJ_PHRASES},
+    "room_label_source": "`region_label` = scene_info regions[].category (HOV-SG human label), not voted_category.",
     "gt": "`gt_objects` follows hm3dsem/long_queries_obj_room.json (hier_id = floor_region_object, pcd relative "
-          "to data_root). Anchors/distractors/room-descriptor objects are listed by object_id of the same scene_info.",
+          "to data_root). The GT box is `aabb_center`/`aabb_dims` (= scene_info); do not recompute it from the pcd "
+          "(the ply extent differs by up to ~0.3 m). obb_* currently equals the AABB (identity rotation).",
+    "output_and_scoring": {
+        "box_setting": "predict a world-frame AABB; score 3D axis-aligned IoU vs the GT AABB at 0.25 and 0.5.",
+        "instance_setting": "only for methods that select among GT instances (oracle segmentation): "
+                            "accuracy = predicted object_id == gt object_id. Report separately.",
+    },
+    "metadata_use": "anchors, distractor_ids, tier, relation, rival_rooms, room_descriptor are for analysis "
+                    "(breakdowns, anchor-grounding / wrong-room diagnostics), never method inputs.",
+    "object_filter": "Everywhere (anchors, distractors, tiers) objects of `excluded_classes` or with largest AABB "
+                     "side < 5 cm (incl. zero-size boxes) are ignored; `distractor_ids` = the remaining same-class "
+                     "objects in the target's room.",
     "uniqueness": [
-        "target and anchor classes exclude structure/parts/vague labels (see `excluded_classes`) and objects < 5 cm",
-        "each anchor is the only object of its class in the room",
-        "no other same-class object in the room satisfies a relaxed version of the relation",
+        "each anchor is the only (filtered) object of its class in the room",
+        "no other same-class object in the room satisfies a relaxed version of the relation (see `relations`)",
         f"closest/farthest: winner beats runner-up by >= {MARGIN} m and >= {RATIO}x distance, same winner by "
         "surface (AABB-gap) distance",
         "rooms labelled empty/unknown are never used",
     ],
     "relations": {
-        "near": "AABB gap <= 0.5 m (distractors must be > 1.0 m)",
-        "above / below": "vertical gap 0.1-1.5 m and >= 30% horizontal footprint overlap",
-        "on": "target bottom within 0.1 m of anchor top, >= 70% of target footprint over the anchor",
-        "in": ">= 90% of target AABB volume inside anchor AABB, anchor >= 3x target volume",
+        "near": "AABB gap <= 0.5 m; relaxed (distractors must fail): gap <= 1.0 m",
+        "above / below": "vertical gap 0.1-1.5 m and >= 30% footprint overlap (of the smaller footprint); "
+                         "relaxed: gap -0.1-2.0 m and >= 10%",
+        "on": "target bottom within 0.1 m of anchor top, >= 70% of target footprint over the anchor, anchor "
+              "footprint larger; relaxed: within 0.2 m and >= 30%",
+        "in": ">= 90% of target AABB volume inside anchor AABB, anchor >= 3x target volume; relaxed: >= 50%",
         "between": "target centre projects to 20-80% of the anchor-anchor segment (floor plane), "
-                   "offset <= min(0.25 x length, 1 m); anchors 0.5-5 m apart",
-        "closest / farthest": "centre distance ranking among same-class objects in the room",
+                   "offset <= min(0.25 x length, 1 m); anchors 0.5-5 m apart; relaxed: 10-90%, offset <= 0.4 x length",
+        "closest / farthest": "centre distance ranking among same-class objects in the room (see uniqueness)",
     },
     "relation_groups": {"proximity": ["near"], "vertical": ["above", "below"], "support": ["on"],
                         "containment": ["in"], "between": ["between"], "superlative": ["closest", "farthest"]},
@@ -413,9 +443,11 @@ SPEC = {
                        f"boundary <= {ADJ_DIST} m, same floor).",
     "rival_rooms": "other rooms (any label) where the room-less statement also holds",
     "suggested_evaluation": {
-        "primary": "top-1 accuracy: predicted object == gt (instance id match), or 3D IoU >= 0.25 / 0.5 "
-                   "against gt AABB when the method outputs boxes",
-        "breakdowns": ["tier (T0-T3)", "relation_group", "room_descriptor.type", "has in-room distractor"],
+        "primary": "Acc@0.25 / Acc@0.5 (box setting); Acc@id in the instance setting",
+        "breakdowns": ["tier (T0-T3)", "relation_group", "room_descriptor.type", "has in-room distractor",
+                       "scene"],
+        "diagnostics": ["wrong-room rate: prediction lies in a `rival_rooms` region",
+                        "anchor grounding accuracy (if the method exposes anchors)"],
         "room_ablation": "run `query` and `query_without_room`; the T2/T3 gap measures use of room information",
     },
 }
@@ -473,7 +505,9 @@ def bundle(per_scene, root, split, n, seed, sampled):
         "scene_layout": {k: f"{split}/<scene>/{v}" for k, v in {
             "scene_info": "scene_info.json", "object_pcd": "objects/<object_id>.ply",
             "region_pcd": "regions/<region_id>.ply", "rgb": "rgb/", "depth": "depth/", "pose": "pose/"}.items()},
-        "generator": {"script": "scripts/gen_hm3dsem_iref_queries.py (KeySG repo)", "seed": seed},
+        "generator": {"script": "scripts/gen_hm3dsem_iref_queries.py", "repo": "github.com/HyeonJaeGil/KeySG",
+                      "branch": "feat/hm3dsem-iref-queries", "seed": seed,
+                      "note": "all thresholds are spelled out in `spec`; the script is not needed to evaluate"},
         "spec": SPEC,
         "excluded_classes": sorted(EXCLUDE),
         "num_queries": len(queries),

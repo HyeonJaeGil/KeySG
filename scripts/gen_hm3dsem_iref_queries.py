@@ -8,8 +8,17 @@ Every query has exactly one answer inside its room:
   * target/anchor classes exclude structure and vague labels
   * anchors are the only object of their class in the room
   * no same-class distractor satisfies a *relaxed* version of the relation
-  * ordinal relations need a distance margin to both neighbours
+  * superlatives need a distance margin to the runner-up
 Rooms labelled empty/unknown are skipped.
+
+Cross-room tier (does the same statement also fit elsewhere in the scene?):
+  T0 target class exists only in this room
+  T1 target class exists in other rooms, statement does not hold there
+  T2 statement also holds in a differently-labelled room -> the room label resolves it
+  T3 statement also holds in a same-labelled room -> a room descriptor is appended
+     ("the bedroom with the desk", "the bedroom next to the kitchen") that singles the room
+     out among all same-labelled rooms; T3 queries without such a descriptor are dropped.
+Sampling balances relation group x tier cells.
 """
 import argparse
 import json
@@ -28,7 +37,7 @@ EXCLUDE = {
     "wall", "ceiling", "floor", "door frame", "window frame", "shower wall", "beam", "support beam",
     "ceiling light fixture connection", "wall panel", "parapet", "pipe", "stairs", "handrail",
     "stairs railing", "railing", "baseboard", "column", "pillar", "window glass", "door hinge",
-    "ceiling molding", "skirting board", "floor mat frame",
+    "ceiling molding", "skirting board", "floor mat frame", "door knob",
     # vague
     "unknown", "clutter", "object", "misc", "stuff", "appliance", "device", "decoration",
     "bathroom accessory", "bathroom utensil", "washing stuff", "basket of something", "wall electronics",
@@ -45,6 +54,22 @@ PHRASES = {
     "between": ["between", "in between", "in the middle of"],
 }
 UP = 1  # Y-up
+# Room descriptors: salient objects only (no parts, wall art, or small clutter).
+DESC_MIN_SIZE = 0.3  # m, largest AABB side
+DESC_EXCLUDE = {
+    "door", "window", "curtain", "blinds", "drawer", "cabinet door", "kitchen cabinet door",
+    "kitchen cabinet drawer", "closet door", "door knob", "picture", "painting", "photo mount",
+    "picture frame", "ceiling lamp", "wall lamp", "air vent", "fire alarm", "towel", "clothes",
+    "pillow", "book", "toy", "plush toy", "box", "cardboard box", "bag", "shelf", "cabinet", "rack",
+    "hat", "hanger", "clothes hanger", "towel bar", "shoe", "backpack",
+}
+DESC_EXCLUDE_SUBSTR = ("frame", "pipe", "rod", " with ", " of ")
+
+
+def describable(cls):
+    return cls not in DESC_EXCLUDE and cls not in EXCLUDE and not any(s in cls for s in DESC_EXCLUDE_SUBSTR)
+ADJ_DIST = 0.15  # m, max floor-plan boundary distance for "next to" rooms
+ADJ_PHRASES = ["next to", "adjacent to"]
 GROUPS = {"near": "proximity", "above": "vertical", "below": "vertical", "on": "support", "in": "containment",
           "between": "between", "closest": "superlative", "farthest": "superlative"}
 
@@ -167,63 +192,161 @@ def box_json(b):
     return {"id": b.id, "class": b.cls, "center": b.c.tolist(), "dims": (b.hi - b.lo).tolist()}
 
 
+def holds(room_cls, rel, tcls, acls):
+    """Does '<tcls> <rel> <acls>' describe some object in a room given as {class: [Box]}?"""
+    ts = room_cls.get(tcls, [])
+    if not ts or not all(room_cls.get(a) for a in acls):
+        return False
+    if rel in BINARY:
+        return any(BINARY[rel](t, a) for t in ts for a in room_cls[acls[0]])
+    if rel == "between":
+        return any(between(t, a1, a2) for t in ts for a1 in room_cls[acls[0]] for a2 in room_cls[acls[1]])
+    return len(ts) >= 2  # superlative: a same-class group to rank exists
+
+
+def adjacency(regions):
+    """Rooms on the same floor whose floor-plan boundaries come within ADJ_DIST."""
+    from scipy.spatial import cKDTree
+
+    pts = {r["id"]: np.asarray(r["bev_region_points"])[:, [0, 2]]
+           for r in regions if len(r.get("bev_region_points") or []) > 0}
+    trees = {k: cKDTree(v) for k, v in pts.items()}
+    floor = {r["id"]: r.get("floor_id") for r in regions}
+    adj = defaultdict(set)
+    for a, b in combinations(sorted(pts), 2):
+        if floor[a] == floor[b] and trees[b].query(pts[a], k=1)[0].min() <= ADJ_DIST:
+            adj[a].add(b)
+            adj[b].add(a)
+    return adj
+
+
+def room_descriptor(rid, label_of, room_cls, adj, used_cls, rng):
+    """Phrase that singles room `rid` out among all rooms sharing its label, or None."""
+    lab = label_of[rid]
+    peers = [r for r in label_of if r != rid and label_of[r] == lab]
+    options = {}
+
+    salient = sorted(
+        ((max(max(b.hi - b.lo) for b in bs), c) for c, bs in room_cls[rid].items()
+         if describable(c) and c not in used_cls and max(max(b.hi - b.lo) for b in bs) >= DESC_MIN_SIZE),
+        reverse=True)
+    unique = [c for _, c in salient if not any(c in room_cls.get(p, {}) for p in peers)]
+    if unique:  # among the most salient unique classes; sometimes name two
+        k = 2 if len(unique) >= 2 and rng.random() < 0.3 else 1
+        options["objects"] = rng.sample(unique[:4], k)
+    else:  # no single class singles it out: try a pair
+        for c1, c2 in combinations([c for _, c in salient], 2):
+            if not any(c1 in room_cls.get(p, {}) and c2 in room_cls.get(p, {}) for p in peers):
+                options["objects"] = [c1, c2]
+                break
+
+    nbr_labels = {label_of[n] for n in adj.get(rid, ()) if n in label_of} - {lab}
+    nbr_labels = {l for l in nbr_labels if l.strip().lower() not in SKIP_ROOMS}
+    good = sorted(l for l in nbr_labels
+                  if not any(l in {label_of.get(n) for n in adj.get(p, ())} for p in peers))
+    if good:
+        options["adjacent"] = [rng.choice(good)]
+
+    if not options:
+        return None
+    kind = rng.choice(sorted(options))
+    if kind == "objects":
+        cls = options["objects"]
+        ids = [b.id for c in cls for b in room_cls[rid][c]]
+        return {"type": "objects", "classes": cls, "object_ids": ids,
+                "text": "with " + " and ".join(f"the {c}" for c in cls)}
+    nlab = options["adjacent"][0]
+    nids = [n for n in adj[rid] if label_of.get(n) == nlab]
+    return {"type": "adjacent", "neighbor_label": nlab, "neighbor_region_ids": nids,
+            "text": f"{rng.choice(ADJ_PHRASES)} the {nlab}"}
+
+
 def generate(scene_info, rng):
     rooms = {r["id"]: r for r in scene_info["regions"]}
+    label_of = {rid: r["category"] for rid, r in rooms.items()}
+    room_cls = defaultdict(lambda: defaultdict(list))  # rid -> class -> [Box]
     objs = defaultdict(list)
     for o in scene_info["objects"]:
         if o["category"] not in EXCLUDE and max(o["aabb_dims"]) >= MIN_SIZE:
-            objs[o["region_id"]].append(Box(o))
+            b = Box(o)
+            objs[o["region_id"]].append(b)
+            room_cls[o["region_id"]][b.cls].append(b)
+    adj = adjacency(scene_info["regions"])
     queries = []
     for rid in sorted(objs):
         room = rooms.get(rid)
         if room is None or room["category"].strip().lower() in SKIP_ROOMS:
             continue
         for t, rel, ancs, dis in region_queries(objs[rid], rng):
+            acls = [a.cls for a in ancs]
+            others = [r for r in room_cls if r != rid]
+            rivals = [r for r in others if holds(room_cls[r], rel, t.cls, acls)]
+            same_label = [r for r in rivals if label_of.get(r) == room["category"]]
+            if same_label:
+                tier = "T3"
+            elif rivals:
+                tier = "T2"
+            elif any(room_cls[r].get(t.cls) for r in others):
+                tier = "T1"
+            else:
+                tier = "T0"
+            desc = None
+            if tier == "T3":
+                desc = room_descriptor(rid, label_of, room_cls, adj, {t.cls, *acls}, rng)
+                if desc is None:
+                    continue
             stmt = statement(t.cls, rng.choice(PHRASES[rel]), ancs)
+            room_ref = room["category"] + (f" {desc['text']}" if desc else "")
             queries.append({
-                "query": f"In the {room['category']}, {stmt}",
+                "query": f"In the {room_ref}, {stmt}",
                 "statement": stmt,
                 "relation": rel,
                 "relation_type": "ternary" if rel == "between" else "binary",
+                "tier": tier,
                 "region_id": rid,
                 "region_label": room["category"],
+                "room_descriptor": desc,
+                "rival_rooms": [{"region_id": r, "label": label_of.get(r)} for r in rivals],
                 "floor_id": room.get("floor_id"),
                 "target_id": t.id,
                 "target_class": t.cls,
                 "target": box_json(t),
                 "anchors": [box_json(a) for a in ancs],
-                "anchor_classes": [a.cls for a in ancs],
+                "anchor_classes": acls,
                 "distractor_ids": [d.id for d in dis],
             })
     return queries
 
 
 def sample(queries, n, rng):
-    """Rotate relation groups (least-picked first), then the group's least-picked relation; within
-    it pick the candidate adding the most unseen target class / instance / anchor class / room,
-    preferring ones with distractors."""
-    by_rel = defaultdict(list)
+    """Rotate tiers (least-picked first; four equal tiers put half the budget on cross-room T2/T3),
+    then the least-picked relation group overall within that tier, then its least-picked relation;
+    within it pick the candidate adding the most unseen target class / instance / anchor class /
+    room, preferring ones with distractors."""
+    by_key = defaultdict(list)  # (group, tier, relation) -> queries
     for q in queries:
-        by_rel[q["relation"]].append(q)
-    for v in by_rel.values():
+        by_key[(GROUPS[q["relation"]], q["tier"], q["relation"])].append(q)
+    for v in by_key.values():
         rng.shuffle(v)
 
     def feats(q):
         return ([("t", q["target_class"]), ("i", q["target_id"]), ("r", q["region_id"])]
                 + [("a", a) for a in q["anchor_classes"]])
 
-    seen, rel_n, grp_n, out = Counter(), Counter(), Counter(), []
-    while len(out) < n and any(by_rel.values()):
-        live = [r for r in by_rel if by_rel[r]]
-        grp = min({GROUPS[r] for r in live}, key=lambda g: (grp_n[g], g))
-        rel = min((r for r in live if GROUPS[r] == grp), key=lambda r: (rel_n[r], r))
-        cand = by_rel[rel]
+    seen, tier_n, grp_n, key_n, out = Counter(), Counter(), Counter(), Counter(), []
+    while len(out) < n and any(by_key.values()):
+        live = [k for k in by_key if by_key[k]]
+        tier = min({k[1] for k in live}, key=lambda t: (tier_n[t], t))
+        grp = min({k[0] for k in live if k[1] == tier}, key=lambda g: (grp_n[g], g))
+        key = min((k for k in live if k[:2] == (grp, tier)), key=lambda k: (key_n[k], k))
+        cand = by_key[key]
         best = max(range(len(cand)),
                    key=lambda i: (-sum(seen[f] for f in feats(cand[i])), bool(cand[i]["distractor_ids"])))
         q = cand.pop(best)
         out.append(q)
-        rel_n[rel] += 1
+        tier_n[tier] += 1
         grp_n[grp] += 1
+        key_n[key] += 1
         seen.update(feats(q))
     return out
 
@@ -247,7 +370,9 @@ def main():
         print(f"{scene}: all={len(qs)} sampled={len(sub)} rooms={len({q['region_id'] for q in sub})} "
               f"target_cls={len({q['target_class'] for q in sub})} "
               f"with_distractors={sum(bool(q['distractor_ids']) for q in sub)} "
-              f"group={dict(sorted(Counter(GROUPS[q['relation']] for q in sub).items()))}")
+              f"group={dict(sorted(Counter(GROUPS[q['relation']] for q in sub).items()))} "
+              f"tier={dict(sorted(Counter(q['tier'] for q in sub).items()))} "
+              f"all_tier={dict(sorted(Counter(q['tier'] for q in qs).items()))}")
 
 
 if __name__ == "__main__":

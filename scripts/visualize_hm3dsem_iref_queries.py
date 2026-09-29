@@ -1,7 +1,9 @@
 """Viser viewer for IRef-style HM3DSem queries (see gen_hm3dsem_iref_queries.py).
 
 One port, scene dropdown + query dropdown. Selecting a query shows only its room's RGB point
-cloud with target (green) / anchor (blue) / distractor (red) AABBs; "Clear" restores the full scene.
+cloud with target (green) / anchor (blue) / distractor (red) AABBs, plus the room descriptor
+(orange object boxes, or the neighbouring room's cloud); "Clear" restores the full scene. A tier
+filter narrows the query list and "Show rival rooms" overlays rooms where the statement also holds.
 
     python scripts/visualize_hm3dsem_iref_queries.py --port 8080
 """
@@ -18,7 +20,9 @@ import viser
 SCENES = ["00824-Dd4bFSTQ8gi", "00829-QaLdnwvtxbs", "00843-DYehNKdT76V", "00861-GLAQ4DNUx5U",
           "00862-LT9Jq6dN3Ea", "00873-bxsVRursffK", "00877-4ok3usBNeis", "00890-6s7QHgap2fW"]
 NONE = "(none)"
-COLORS = {"target": (40, 220, 60), "anchor": (40, 120, 255), "distractor": (240, 50, 50)}
+COLORS = {"target": (40, 220, 60), "anchor": (40, 120, 255), "distractor": (240, 50, 50),
+          "room cue": (255, 150, 0)}
+TIERS = ["All", "T0", "T1", "T2", "T3"]
 
 
 class Viewer:
@@ -53,6 +57,9 @@ class Viewer:
     def _build_gui(self):
         gui = self.server.gui
         self.dd_scene = gui.add_dropdown("Scene", SCENES, initial_value=SCENES[0])
+        self.dd_tier = gui.add_dropdown("Tier filter", TIERS, initial_value="All",
+                                        hint="T0 class only here · T1 class elsewhere · T2 statement holds in "
+                                             "another-label room · T3 holds in same-label room (room descriptor)")
         self.dd_query = gui.add_dropdown("Query", [NONE], initial_value=NONE)
         with gui.add_folder("Navigate"):
             b_prev, b_next = gui.add_button("Prev query"), gui.add_button("Next query")
@@ -63,12 +70,18 @@ class Viewer:
             self.sl_line = gui.add_slider("Box line width", min=1.0, max=10.0, step=0.5, initial_value=3.0)
             self.cb_dis = gui.add_checkbox("Show distractors", initial_value=True)
             self.cb_labels = gui.add_checkbox("Show box labels", initial_value=True)
+            self.cb_rivals = gui.add_checkbox("Show rival rooms", initial_value=False,
+                                              hint="Other rooms where the same statement also holds")
         self.txt = gui.add_text("Full query", "", multiline=True, disabled=True)
         self.md = gui.add_markdown("")
 
         @self.dd_scene.on_update
         def _(_):
             self.load_scene(self.dd_scene.value)
+
+        @self.dd_tier.on_update
+        def _(_):
+            self.set_query_options()
 
         @self.dd_query.on_update
         def _(_):
@@ -93,7 +106,7 @@ class Viewer:
                 if isinstance(h, viser.PointCloudHandle):
                     h.point_size = self.sl_size.value
 
-        for cb in (self.cb_dis, self.cb_labels, self.sl_line):
+        for cb in (self.cb_dis, self.cb_labels, self.cb_rivals, self.sl_line):
             cb.on_update(lambda _: self.show_query(self.dd_query.value))
 
     # ---------- scene ----------
@@ -117,9 +130,25 @@ class Viewer:
             qf = self.args.query_dir / f"{scene}_{self.args.suffix}.json"
             self.queries = json.loads(qf.read_text()) if qf.exists() else []
             self.by_label = {self.label(i, q): q for i, q in enumerate(self.queries)}
-        self.dd_query.options = [NONE, *self.by_label]
+        self.set_query_options()
+
+    def set_query_options(self):
+        tier = self.dd_tier.value
+        self.dd_query.options = [NONE, *(k for k, q in self.by_label.items()
+                                         if tier == "All" or q.get("tier") == tier)]
         self.dd_query.value = NONE
         self.show_query(NONE)
+
+    def add_region(self, name, rid):
+        path = self.args.data_root / self.scene / "regions" / f"{rid}.ply"
+        if path.exists():
+            pts, cols = self.cloud(path)
+            self.focus.append(self.server.scene.add_point_cloud(
+                f"/focus/{name}", pts, cols, point_size=self.sl_size.value, point_shading="flat"))
+
+    def obj_box(self, oid):
+        o = self.objects(self.scene)[oid]
+        return {"id": oid, "class": o["category"], "center": o["aabb_center"], "dims": o["aabb_dims"]}
 
     def add_box(self, name, b, kind):
         # 12 AABB edges as line segments (a wireframe box mesh draws face diagonals)
@@ -149,26 +178,35 @@ class Viewer:
                 return
             self.full.visible = False
             self.txt.value = q["query"]
-            pts, cols = self.cloud(self.args.data_root / self.scene / "regions" / f"{q['region_id']}.ply")
-            self.focus.append(self.server.scene.add_point_cloud(
-                "/focus/region", pts, cols, point_size=self.sl_size.value, point_shading="flat"))
+            self.add_region("region", q["region_id"])
             self.add_box("target", q["target"], "target")
             for i, a in enumerate(q["anchors"]):
                 self.add_box(f"anchor{i}", a, "anchor")
             if self.cb_dis.value:
-                objs = self.objects(self.scene)
                 for d in q["distractor_ids"]:
-                    o = objs[d]
-                    self.add_box(f"dis{d}", {"id": d, "class": o["category"], "center": o["aabb_center"],
-                                             "dims": o["aabb_dims"]}, "distractor")
+                    self.add_box(f"dis{d}", self.obj_box(d), "distractor")
+            desc = q.get("room_descriptor")
+            if desc and desc["type"] == "objects":
+                for oid in desc["object_ids"]:
+                    self.add_box(f"cue{oid}", self.obj_box(oid), "room cue")
+            elif desc:  # adjacent room: show it too
+                for rid in desc["neighbor_region_ids"]:
+                    self.add_region(f"neighbor{rid}", rid)
+            rivals = q.get("rival_rooms", [])
+            if self.cb_rivals.value:
+                for r in rivals:
+                    self.add_region(f"rival{r['region_id']}", r["region_id"])
             self.md.content = (
-                f"**{q['query']}**  \n"
-                f"relation: `{q['relation']}` · room: {q['region_label']} (region {q['region_id']}, "
-                f"floor {q['floor_id']})  \n"
+                f"relation: `{q['relation']}` · tier: `{q.get('tier', '-')}` · room: {q['region_label']} "
+                f"(region {q['region_id']}, floor {q['floor_id']})  \n"
                 f"<span style='color:#28dc3c'>■</span> target: {q['target_class']} ({q['target_id']})  \n"
                 f"<span style='color:#2878ff'>■</span> anchor: "
                 + ", ".join(f"{a['class']} ({a['id']})" for a in q["anchors"]) + "  \n"
-                f"<span style='color:#f03232'>■</span> distractors: {len(q['distractor_ids'])}")
+                f"<span style='color:#f03232'>■</span> distractors: {len(q['distractor_ids'])}  \n"
+                + (f"<span style='color:#ff9600'>■</span> room descriptor ({desc['type']}): {desc['text']}"
+                   + (" — neighbor room cloud shown" if desc["type"] == "adjacent" else "") + "  \n"
+                   if desc else "")
+                + "rival rooms: " + (", ".join(f"{r['label']} ({r['region_id']})" for r in rivals) or "none"))
 
     def objects(self, scene):
         key = ("objects", scene)

@@ -380,7 +380,8 @@ SPEC = {
     "official_test_set": "iref_room_queries.json (1200 = 150/scene). iref_room_queries_all.json is the candidate "
                          "pool it was sampled from (same format), for analysis only.",
     "method_inputs": {
-        "allowed": "val/<scene>/rgb/*.png, depth/*.png, pose/*.txt (+ the intrinsics below) and the query text.",
+        "allowed": "val/<scene>/rgb/*.png, depth/*.png, pose/*.txt (+ the intrinsics below) and the query text. "
+                   "This is a whitelist: every other file (e.g. scene_rgb.ply, room_transition_gt*.json) is off-limits.",
         "gt_only_do_not_feed_to_methods": "scene_info.json, objects/, regions/, scene_panoptic.ply, semantic/ "
                                           "(per-pixel GT instance ids), and every per-query field other than "
                                           "`query` / `query_without_room`.",
@@ -404,8 +405,14 @@ SPEC = {
           "(the ply extent differs by up to ~0.3 m). obb_* currently equals the AABB (identity rotation).",
     "output_and_scoring": {
         "box_setting": "predict a world-frame AABB; score 3D axis-aligned IoU vs the GT AABB at 0.25 and 0.5.",
-        "instance_setting": "only for methods that select among GT instances (oracle segmentation): "
-                            "accuracy = predicted object_id == gt object_id. Report separately.",
+        "instance_setting": "only for methods that select among GT instances (oracle segmentation): candidates are "
+                            "ALL scene_info objects of the scene (unfiltered); accuracy = predicted object_id == gt "
+                            "object_id. Report separately.",
+        "rules": "hit if IoU >= threshold (inclusive); a missing prediction counts as a miss; headline numbers are "
+                 "micro-averaged over all 1200 queries (per-scene numbers are a breakdown).",
+        "wrong_room_test": "a prediction lies in region r if its box centre is inside r's floor polygon "
+                           "(scene_info regions[].bev_region_points, x-z plane) and between r's min_height and "
+                           "max_height.",
     },
     "metadata_use": "anchors, distractor_ids, tier, relation, rival_rooms, room_descriptor are for analysis "
                     "(breakdowns, anchor-grounding / wrong-room diagnostics), never method inputs.",

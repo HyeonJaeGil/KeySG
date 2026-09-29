@@ -41,14 +41,12 @@ PHRASES = {
     "on": ["on", "on top of"],
     "in": ["in", "inside", "within"],
     "closest": ["closest to", "nearest to"],
-    "second_closest": ["second closest to", "second nearest to"],
-    "third_closest": ["third closest to", "third nearest to"],
     "farthest": ["farthest from", "most distant from"],
-    "second_farthest": ["second farthest from", "second most distant from"],
-    "third_farthest": ["third farthest from", "third most distant from"],
     "between": ["between", "in between", "in the middle of"],
 }
 UP = 1  # Y-up
+GROUPS = {"near": "proximity", "above": "vertical", "below": "vertical", "on": "support", "in": "containment",
+          "between": "between", "closest": "superlative", "farthest": "superlative"}
 
 
 class Box:
@@ -106,8 +104,7 @@ def inside(t, a, relaxed=False):
 
 
 BINARY = {"near": near, "above": above, "below": below, "on": on, "in": inside}
-ORDINAL = {"closest": (0, False), "second_closest": (1, False), "third_closest": (2, False),
-           "farthest": (0, True), "second_farthest": (1, True), "third_farthest": (2, True)}
+ORDINAL = {"closest": (0, False), "farthest": (0, True)}  # superlatives; 2nd/3rd dropped as unnatural
 MARGIN = 0.3  # m, ordinal distance gap to neighbours
 
 
@@ -202,8 +199,9 @@ def generate(scene_info, rng):
 
 
 def sample(queries, n, rng):
-    """Rotate relations (least-picked first); within a relation pick the candidate adding the
-    most unseen target class / instance / anchor class / room, preferring ones with distractors."""
+    """Rotate relation groups (least-picked first), then the group's least-picked relation; within
+    it pick the candidate adding the most unseen target class / instance / anchor class / room,
+    preferring ones with distractors."""
     by_rel = defaultdict(list)
     for q in queries:
         by_rel[q["relation"]].append(q)
@@ -214,15 +212,18 @@ def sample(queries, n, rng):
         return ([("t", q["target_class"]), ("i", q["target_id"]), ("r", q["region_id"])]
                 + [("a", a) for a in q["anchor_classes"]])
 
-    seen, rel_n, out = Counter(), Counter(), []
+    seen, rel_n, grp_n, out = Counter(), Counter(), Counter(), []
     while len(out) < n and any(by_rel.values()):
-        rel = min((r for r in by_rel if by_rel[r]), key=lambda r: (rel_n[r], r))
+        live = [r for r in by_rel if by_rel[r]]
+        grp = min({GROUPS[r] for r in live}, key=lambda g: (grp_n[g], g))
+        rel = min((r for r in live if GROUPS[r] == grp), key=lambda r: (rel_n[r], r))
         cand = by_rel[rel]
         best = max(range(len(cand)),
                    key=lambda i: (-sum(seen[f] for f in feats(cand[i])), bool(cand[i]["distractor_ids"])))
         q = cand.pop(best)
         out.append(q)
         rel_n[rel] += 1
+        grp_n[grp] += 1
         seen.update(feats(q))
     return out
 
@@ -246,7 +247,7 @@ def main():
         print(f"{scene}: all={len(qs)} sampled={len(sub)} rooms={len({q['region_id'] for q in sub})} "
               f"target_cls={len({q['target_class'] for q in sub})} "
               f"with_distractors={sum(bool(q['distractor_ids']) for q in sub)} "
-              f"rel={dict(sorted(Counter(q['relation'] for q in sub).items()))}")
+              f"group={dict(sorted(Counter(GROUPS[q['relation']] for q in sub).items()))}")
 
 
 if __name__ == "__main__":

@@ -60,8 +60,10 @@ class Viewer:
         with gui.add_folder("Display"):
             self.sl_size = gui.add_slider("Point size", min=0.001, max=0.05, step=0.001,
                                           initial_value=self.args.point_size)
+            self.sl_line = gui.add_slider("Box line width", min=1.0, max=10.0, step=0.5, initial_value=3.0)
             self.cb_dis = gui.add_checkbox("Show distractors", initial_value=True)
             self.cb_labels = gui.add_checkbox("Show box labels", initial_value=True)
+        self.txt = gui.add_text("Full query", "", multiline=True, disabled=True)
         self.md = gui.add_markdown("")
 
         @self.dd_scene.on_update
@@ -91,7 +93,7 @@ class Viewer:
                 if isinstance(h, viser.PointCloudHandle):
                     h.point_size = self.sl_size.value
 
-        for cb in (self.cb_dis, self.cb_labels):
+        for cb in (self.cb_dis, self.cb_labels, self.sl_line):
             cb.on_update(lambda _: self.show_query(self.dd_query.value))
 
     # ---------- scene ----------
@@ -120,10 +122,15 @@ class Viewer:
         self.show_query(NONE)
 
     def add_box(self, name, b, kind):
-        c = COLORS[kind]
-        self.focus.append(self.server.scene.add_box(
-            f"/focus/{name}", color=c, dimensions=tuple(b["dims"]), position=tuple(b["center"]),
-            wireframe=True))
+        # 12 AABB edges as line segments (a wireframe box mesh draws face diagonals)
+        lo = np.asarray(b["center"]) - np.asarray(b["dims"]) / 2
+        hi = lo + np.asarray(b["dims"])
+        corners = np.array([[(lo, hi)[i >> 2 & 1][0], (lo, hi)[i >> 1 & 1][1], (lo, hi)[i & 1][2]]
+                            for i in range(8)], np.float32)
+        edges = [(i, i ^ bit) for i in range(8) for bit in (1, 2, 4) if not i & bit]
+        segs = corners[np.array(edges)]
+        self.focus.append(self.server.scene.add_line_segments(
+            f"/focus/{name}", segs, np.array(COLORS[kind], np.uint8), line_width=self.sl_line.value))
         if self.cb_labels.value:
             top = np.asarray(b["center"]) + [0, b["dims"][1] / 2 + 0.05, 0]
             self.focus.append(self.server.scene.add_label(
@@ -136,10 +143,12 @@ class Viewer:
             if q is None:
                 if self.full is not None:
                     self.full.visible = True
+                self.txt.value = ""
                 self.md.content = (f"**{self.scene}** — {len(self.queries)} queries  \n"
                                    "Full scene shown. Pick a query to focus its room.")
                 return
             self.full.visible = False
+            self.txt.value = q["query"]
             pts, cols = self.cloud(self.args.data_root / self.scene / "regions" / f"{q['region_id']}.ply")
             self.focus.append(self.server.scene.add_point_cloud(
                 "/focus/region", pts, cols, point_size=self.sl_size.value, point_shading="flat"))

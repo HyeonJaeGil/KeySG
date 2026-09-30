@@ -109,13 +109,21 @@ class FloorSegmentation:
         clustering = DBSCAN(eps=1, min_samples=1).fit(peak_heights.reshape(-1, 1))
         labels = clustering.labels_
 
-        # Extract representative peaks from each cluster
+        # The lowest cluster is the ground floor and the highest the top ceiling: one peak each.
+        # A cluster in between is a slab (ceiling below + floor above, < eps apart), so it
+        # contributes two peaks, as in HOV-SG. Taking one peak per slab shifts the
+        # (floor, ceiling) pairing below and silently drops a whole storey.
+        clusters = sorted(
+            (peaks[labels == label] for label in np.unique(labels)),
+            key=lambda p: hist_edges[p].min(),
+        )
         clustered_peaks = []
-        for label in np.unique(labels):
-            cluster_peaks = peaks[labels == label]
-            # Take the highest peak in each cluster
-            best_idx = np.argmax(hist_smooth[cluster_peaks])
-            clustered_peaks.append(hist_edges[cluster_peaks[best_idx]])
+        for i, cluster_peaks in enumerate(clusters):
+            n = 1 if i in (0, len(clusters) - 1) else 2
+            top = cluster_peaks[np.argsort(hist_smooth[cluster_peaks])[-n:]]
+            if len(top) < n:  # single-peak slab: it bounds both storeys
+                top = np.repeat(top, n)
+            clustered_peaks.extend(hist_edges[top].tolist())
 
         clustered_peaks = sorted(clustered_peaks)
 

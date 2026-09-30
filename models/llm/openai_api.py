@@ -228,7 +228,9 @@ class GPTInterface:
         dimensions: Optional[int] = None,
         encoding_format: str = "float",
         return_usage: bool = False,
-        max_total_tokens: int = 300_000,
+        # The API caps a request at 300k tokens by its own count, which runs slightly above
+        # tiktoken's; budgeting exactly 300k fails with max_tokens_per_request on large scenes.
+        max_total_tokens: int = 250_000,
         split_aggregate: str = "mean",
     ) -> Union[List[float], List[List[float]], Dict[str, Any]]:
         """Create vector embeddings for text strings."""

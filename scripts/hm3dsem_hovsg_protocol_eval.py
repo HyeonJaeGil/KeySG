@@ -125,10 +125,13 @@ class SceneIndex:
 
     def query(self, encode, query, top_k, room_topk):
         floor, room_q, obj_q = parse_query(query)
-        on_floor = self.rooms_on_floor(floor)
-        room_ids = rank_rooms(
-            encode([room_q])[0], {rid: self.room_views.get(rid, []) for rid in on_floor}, room_topk
-        )
+        if room_topk <= 0:  # flat: skip floor and room selection, rank every object in the scene
+            room_ids = list(self.room_objects)
+        else:
+            on_floor = self.rooms_on_floor(floor)
+            room_ids = rank_rooms(
+                encode([room_q])[0], {rid: self.room_views.get(rid, []) for rid in on_floor}, room_topk
+            )
         objects = [o for rid in room_ids for o in self.room_objects.get(rid, [])]
         if not objects:
             return [], room_ids
@@ -232,7 +235,8 @@ def main():
     parser.add_argument("--keysg-root", help="dir with one KeySG output dir per scene")
     parser.add_argument("--scenes", nargs="*", default=None)
     parser.add_argument("--top-k", type=int, default=max(TOP_KS))
-    parser.add_argument("--room-topk", type=int, default=3)
+    parser.add_argument("--room-topk", type=int, default=3,
+                        help="rooms kept; 0 skips floor and room selection and ranks all objects")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", default=None)
     parser.add_argument("--self-test", action="store_true")
